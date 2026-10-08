@@ -1,0 +1,157 @@
+.detail {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  overscroll-behavior: contain;
+}
+
+/* Pull-to-refresh */
+.ptr {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 20px;
+  height: 0;
+  overflow: hidden;
+  transition: height .15s ease;
+}
+.ptr.show { height: 34px; }
+.ptr.spin { animation: rot 1s linear infinite; }
+@keyframes rot { to { transform: rotate(360deg); } }
+
+/* Kartlar */
+.card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.card-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  margin-bottom: 8px;
+}
+
+/* Bakiye */
+.balance-card { text-align: center; }
+.balance { font-size: 34px; font-weight: 800; margin-bottom: 4px; }
+.pnl { font-size: 14px; font-weight: 700; }
+.pnl.up { color: var(--green); }
+.pnl.down { color: var(--red); }
+
+/* Coin secici */
+.coin-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.coin {
+  flex: 1;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 4px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+}
+.coin.active { border-color: var(--gold); background: rgba(240,185,11,.08); }
+.coin-sym { color: var(--text); font-weight: 800; font-size: 14px; }
+.coin-price { color: var(--text-dim); font-size: 11px; }
+
+/* Fiyat + MA */
+.price-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.big-price { font-size: 26px; font-weight: 800; }
+.chg { font-size: 13px; font-weight: 700; padding: 4px 8px; border-radius: 6px; }
+.chg.up { color: var(--green); background: rgba(14,203,129,.1); }
+.chg.down { color: var(--red); background: rgba(246,70,93,.1); }
+.ma-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.ma { display: flex; flex-direction: column; gap: 2px; font-size: 13px; font-weight: 700; }
+.ma-name { color: var(--text-dim); font-size: 11px; font-weight: 400; }
+.signal {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 5px 12px;
+  border-radius: 6px;
+  letter-spacing: 1px;
+}
+.signal.long { color: var(--green); border: 1px solid var(--green); }
+.signal.short { color: var(--red); border: 1px solid var(--red); }
+
+/* Kaldirac segmenti */
+.seg { display: flex; gap: 8px; margin-bottom: 16px; }
+.seg-btn {
+  flex: 1;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.seg-btn.active { border-color: var(--gold); color: var(--gold); }
+
+/* Kilitli ayarlar */
+#settingsCard.locked { opacity: .45; pointer-events: none; }
+
+/* Bot durumu */
+.bot-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.bot-state { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; }
+.dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 8px var(--red);
+}
+.dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.bot-btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 8px;
+  background: var(--green);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.bot-btn.stop { background: var(--red); }
+
+/* Pozisyon karti */
+.pos-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.pos-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 14px;
+}
+.pos-item span { color: var(--text-dim); font-size: 11px; text-transform: uppercase; }
+.pos-item b.up { color: var(--green); }
+.pos-item b.down { color: var(--red); }
+.pos-item b.long { color: var(--green); }
+.pos-item b.short { color: var(--red); }

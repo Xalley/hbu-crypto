@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<!-- Guvenlik: sadece kendi dosyalarimiz calisir; veri sadece Supabase ve Bybit'e gider. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://ezwrweshxhrutmsyvufi.supabase.co https://api.bybit.com; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>HBU Crypto</title>
+<link rel="stylesheet" href="base.css">
+<link rel="stylesheet" href="welcome.css">
+<link rel="stylesheet" href="list.css">
+<link rel="stylesheet" href="detail.css">
+<link rel="stylesheet" href="auth.css">
+</head>
+<body>
+
+<!-- LOGIN -->
+<div class="screen active" id="login">
+  <div class="logo">HBU <span>Crypto</span></div>
+  <div class="logo-sub">Trading Bot</div>
+  <div class="auth-box">
+    <div class="field-label">Email</div>
+    <input class="field" id="loginEmail" type="email" autocomplete="username" inputmode="email">
+    <div class="field-label">Password</div>
+    <input class="field" id="loginPass" type="password" autocomplete="current-password">
+    <div class="auth-err" id="loginErr"></div>
+    <button class="btn btn-gold" data-act="login">Sign In</button>
+  </div>
+</div>
+
+<!-- 2FA: ILK KURULUM -->
+<div class="screen" id="mfaEnroll">
+  <div class="topbar">
+    <div class="topbar-title">Set Up 2-Step Verification</div>
+  </div>
+  <div class="detail">
+    <div class="card">
+      <div class="card-label">1 · Scan with Google Authenticator</div>
+      <div class="qr-wrap"><img id="mfaQr" alt="QR"></div>
+      <div class="card-label" style="margin-top:12px">Or enter key manually</div>
+      <div class="mono" id="mfaSecret">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">2 · Enter the 6-digit code</div>
+      <input class="field" id="mfaEnrollCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+      <div class="auth-err" id="mfaEnrollErr"></div>
+      <button class="btn btn-gold" style="max-width:none;margin-bottom:0" data-act="mfaEnrollVerify">Verify</button>
+    </div>
+    <button class="btn btn-outline" style="max-width:none" data-act="logout">Cancel</button>
+  </div>
+</div>
+
+<!-- 2FA: GIRIS DOGRULAMA -->
+<div class="screen" id="mfaChallenge">
+  <div class="logo">HBU <span>Crypto</span></div>
+  <div class="logo-sub">2-Step Verification</div>
+  <div class="auth-box">
+    <div class="field-label">Authenticator Code</div>
+    <input class="field" id="mfaCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+    <div class="auth-err" id="mfaErr"></div>
+    <button class="btn btn-gold" data-act="mfaVerify">Verify</button>
+    <button class="btn btn-outline" data-act="logout">Cancel</button>
+  </div>
+</div>
+
+<!-- WELCOME -->
+<div class="screen" id="welcome">
+  <div class="logo">HBU <span>Crypto</span></div>
+  <div class="logo-sub">Trading Bot</div>
+  <button class="btn btn-gold" data-act="openDemo">Demo Account</button>
+  <button class="btn btn-outline" data-act="openInvestment">Investment Account</button>
+  <button class="link-btn" data-act="logout">Log out</button>
+</div>
+
+<!-- INVESTMENT SELECT -->
+<div class="screen" id="investSelect">
+  <div class="topbar">
+    <button class="back" data-act="goWelcome">‹</button>
+    <div class="topbar-title">Investment Account</div>
+    <div class="acc-tag live-tag" data-env-tag>LIVE</div>
+  </div>
+  <div class="center-col">
+    <button class="btn btn-gold" data-act="openLive">Trade</button>
+    <button class="btn btn-outline" data-act="openApiPage">API</button>
+  </div>
+</div>
+
+<!-- DEMO ACCOUNTS (LIST) -->
+<div class="screen" id="demo">
+  <div class="topbar">
+    <button class="back" data-act="goWelcome">‹</button>
+    <div class="topbar-title">Demo Accounts</div>
+  </div>
+  <div class="list" id="accList"></div>
+  <button class="fab" data-act="openSheet">+</button>
+
+  <div class="overlay" id="sheetOverlay" data-dismiss>
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="field-label">Account Name</div>
+      <input class="field" id="inpName" placeholder="Demo 1" maxlength="24" autocomplete="off">
+      <div class="field-label">Starting Balance (USD)</div>
+      <input class="field" id="inpBalance" placeholder="1000" inputmode="decimal" autocomplete="off">
+      <button class="btn btn-gold" style="margin-bottom:0;max-width:none" data-act="createAccount">Create Account</button>
+    </div>
+  </div>
+</div>
+
+<!-- ACCOUNT DETAIL (DEMO) -->
+<div class="screen" id="account">
+  <div class="topbar">
+    <button class="back" data-act="openDemo">‹</button>
+    <div class="topbar-title" id="accTitle">Account</div>
+    <div class="acc-tag" style="margin-left:auto">DEMO</div>
+  </div>
+
+  <div class="detail" id="detailScroll">
+    <div class="ptr" id="ptr">↓</div>
+
+    <div class="card balance-card">
+      <div class="card-label">Total Balance</div>
+      <div class="balance" id="dBalance">$0.00</div>
+      <div class="pnl" id="dTotalPnl">$0.00 (0.00%)</div>
+    </div>
+
+    <div class="coin-row" id="coinRow">
+      <button class="coin" data-c="BTC" data-act="selectCoin">
+        <span class="coin-sym">BTC</span><span class="coin-price" id="pBTC">—</span>
+      </button>
+      <button class="coin" data-c="ETH" data-act="selectCoin">
+        <span class="coin-sym">ETH</span><span class="coin-price" id="pETH">—</span>
+      </button>
+      <button class="coin" data-c="BNB" data-act="selectCoin">
+        <span class="coin-sym">BNB</span><span class="coin-price" id="pBNB">—</span>
+      </button>
+    </div>
+
+    <div class="card">
+      <div class="price-head">
+        <div>
+          <div class="card-label" id="pairLabel">BTC/USDT</div>
+          <div class="big-price" id="dPrice">—</div>
+        </div>
+        <div class="chg" id="dChg">0.00%</div>
+      </div>
+      <div class="ma-row">
+        <div class="ma"><span class="ma-name" id="dMaFastName">MA(9)</span><span id="dMaFast">—</span></div>
+        <div class="ma"><span class="ma-name" id="dMaSlowName">MA(30)</span><span id="dMaSlow">—</span></div>
+        <div class="signal" id="dSignal">—</div>
+      </div>
+      <div class="ma-row" id="dSafeRow" hidden>
+        <div class="ma"><span class="ma-name">ADX ≥25</span><span id="dAdx">—</span></div>
+        <div class="ma"><span class="ma-name">CHOP ≤61.8</span><span id="dChop">—</span></div>
+        <div class="ma"><span class="ma-name">STOP</span><span id="dTrail">—</span></div>
+        <div class="signal" id="dFilter">—</div>
+      </div>
+    </div>
+
+    <div class="card" id="settingsCard">
+      <div class="card-label">Trade Settings</div>
+
+      <div class="field-label">MA Fast / MA Slow</div>
+      <div class="pair-fields">
+        <input class="field" id="inpMaFast" placeholder="9" inputmode="numeric" maxlength="3" autocomplete="off">
+        <input class="field" id="inpMaSlow" placeholder="30" inputmode="numeric" maxlength="3" autocomplete="off">
+      </div>
+
+      <div class="field-label">Amount (USD)</div>
+      <input class="field" id="inpAmount" placeholder="100" inputmode="decimal" autocomplete="off">
+      <div class="field-label">Leverage</div>
+      <div class="seg" id="segLev">
+        <button class="seg-btn active" data-v="1" data-act="setLev">1x</button>
+        <button class="seg-btn" data-v="2" data-act="setLev">2x</button>
+        <button class="seg-btn" data-v="3" data-act="setLev">3x</button>
+      </div>
+      <div class="field-label">Stop Loss % of price (optional)</div>
+      <input class="field" id="inpSl" placeholder="Off" inputmode="decimal" autocomplete="off">
+      <div class="field-label">Take Profit % of price (optional)</div>
+      <input class="field" id="inpTp" placeholder="Off" inputmode="decimal" autocomplete="off" style="margin-bottom:0">
+    </div>
+
+    <div class="card">
+      <div class="bot-row">
+        <div class="bot-state">
+          <span class="dot" id="botDot"></span>
+          <span id="botText">Bot Stopped</span>
+        </div>
+        <button class="bot-btn" id="botBtn" data-act="toggleBot">Start Bot</button>
+      </div>
+      <div class="bot-msg" id="botMsg"></div>
+    </div>
+
+    <button class="btn btn-outline wide" id="safeBtn" data-act="toggleSafeBot">🛡️ Safe Bot</button>
+
+    <div class="card" id="posCard" hidden>
+      <div class="card-label">Open Position</div>
+      <div class="pos-grid">
+        <div class="pos-item"><span>Direction</span><b id="posDir">—</b></div>
+        <div class="pos-item"><span>Entry Price</span><b id="posEntry">—</b></div>
+        <div class="pos-item"><span>Margin</span><b id="posSize">—</b></div>
+        <div class="pos-item"><span>Leverage</span><b id="posLev">—</b></div>
+        <div class="pos-item"><span>Stop / TP</span><b id="posSlTp">—</b></div>
+        <div class="pos-item"><span>P&amp;L (net)</span><b id="posPnl">—</b></div>
+      </div>
+    </div>
+
+    <button class="btn btn-outline wide" data-act="openHistory">Trade History</button>
+  </div>
+</div>
+
+<!-- TRADE HISTORY (demo + live ortak) -->
+<div class="screen" id="history">
+  <div class="topbar">
+    <button class="back" id="histBack" data-act="historyBack">‹</button>
+    <div class="topbar-title" id="histTitle">Trade History</div>
+  </div>
+  <div class="detail" id="histList"></div>
+</div>
+
+<!-- LIVE TRADE -->
+<div class="screen" id="live">
+  <div class="topbar">
+    <button class="back" data-act="openInvestment">‹</button>
+    <div class="topbar-title">Trade</div>
+    <div class="acc-tag live-tag" data-env-tag>LIVE</div>
+  </div>
+
+  <div class="detail" id="liveScroll">
+    <div class="ptr" id="livePtr">↓</div>
+
+    <div class="card warn-card" id="lWarn" hidden></div>
+
+    <div class="card balance-card">
+      <div class="card-label">Bybit Balance (USDT)</div>
+      <div class="balance" id="lBalance">—</div>
+      <div class="pnl dim" id="lApiDays">—</div>
+    </div>
+
+    <div class="card">
+      <div class="price-head">
+        <div>
+          <div class="card-label" id="lPair">BNB/USDT</div>
+          <div class="big-price" id="lPrice">—</div>
+        </div>
+        <div class="signal" id="lSignal">—</div>
+      </div>
+      <div class="ma-row" id="lSafeRow" hidden>
+        <div class="ma"><span class="ma-name">ADX ≥25</span><span id="lAdx">—</span></div>
+        <div class="ma"><span class="ma-name">CHOP ≤61.8</span><span id="lChop">—</span></div>
+        <div class="ma"><span class="ma-name">STOP</span><span id="lTrail">—</span></div>
+        <div class="signal" id="lFilter">—</div>
+      </div>
+    </div>
+
+    <div class="card" id="lSettingsCard">
+      <div class="card-label">Bot Settings</div>
+      <div class="field-label">Coin</div>
+      <div class="seg" id="lCoinSeg">
+        <button class="seg-btn active" data-c="BNB" data-act="lSetCoin">BNB</button>
+        <button class="seg-btn" data-c="ETH" data-act="lSetCoin">ETH</button>
+        <button class="seg-btn" data-c="BTC" data-act="lSetCoin">BTC</button>
+      </div>
+
+      <div class="field-label">MA Fast / MA Slow</div>
+      <div class="pair-fields">
+        <input class="field" id="lMaFast" placeholder="9" inputmode="numeric" maxlength="3" autocomplete="off">
+        <input class="field" id="lMaSlow" placeholder="30" inputmode="numeric" maxlength="3" autocomplete="off">
+      </div>
+
+      <div class="field-label">Amount (USD) <span id="lMinHint" class="hint"></span></div>
+      <input class="field" id="lAmount" placeholder="10" inputmode="decimal" autocomplete="off">
+      <div class="field-label">Leverage</div>
+      <div class="seg" id="lLevSeg">
+        <button class="seg-btn active" data-v="1" data-act="lSetLev">1x</button>
+        <button class="seg-btn" data-v="2" data-act="lSetLev">2x</button>
+        <button class="seg-btn" data-v="3" data-act="lSetLev">3x</button>
+      </div>
+      <div class="field-label">Stop Loss % of price (required in normal mode)</div>
+      <input class="field" id="lSl" placeholder="e.g. 3" inputmode="decimal" autocomplete="off">
+      <div class="field-label">Take Profit % of price (optional)</div>
+      <input class="field" id="lTp" placeholder="Off" inputmode="decimal" autocomplete="off" style="margin-bottom:0">
+    </div>
+
+    <div class="card">
+      <div class="bot-row">
+        <div class="bot-state">
+          <span class="dot" id="lDot"></span>
+          <span id="lBotText">Bot Stopped</span>
+        </div>
+        <button class="bot-btn" id="lBotBtn" data-act="lToggleBot">Start Bot</button>
+      </div>
+      <div class="bot-msg" id="lBotMsg"></div>
+    </div>
+
+    <button class="btn btn-outline wide" id="lSafeBtn" data-act="lToggleSafeBot">🛡️ Safe Bot</button>
+
+    <div class="card" id="lPosCard" hidden>
+      <div class="card-label">Open Position (Bybit)</div>
+      <div class="pos-grid">
+        <div class="pos-item"><span>Direction</span><b id="lPosDir">—</b></div>
+        <div class="pos-item"><span>Entry Price</span><b id="lPosEntry">—</b></div>
+        <div class="pos-item"><span>Margin</span><b id="lPosSize">—</b></div>
+        <div class="pos-item"><span>Leverage</span><b id="lPosLev">—</b></div>
+        <div class="pos-item"><span>Stop on Bybit</span><b id="lPosSl">—</b></div>
+        <div class="pos-item"><span>Unrealized P&amp;L</span><b id="lPosPnl">—</b></div>
+      </div>
+    </div>
+
+    <button class="btn btn-outline wide" data-act="openLiveHistory">Trade History</button>
+  </div>
+</div>
+
+<!-- API PAGE -->
+<div class="screen" id="apiPage">
+  <div class="topbar">
+    <button class="back" data-act="openInvestment">‹</button>
+    <div class="topbar-title">API</div>
+  </div>
+
+  <div class="detail">
+    <div class="card" id="apiCard">
+      <div class="card-label">API Remaining Days</div>
+      <div class="api-days" id="apiInfo">—</div>
+      <div class="field-label">Enter remaining API days</div>
+      <input class="field" id="apiDaysInput" placeholder="89" inputmode="numeric" autocomplete="off" disabled>
+      <button class="btn btn-outline wide" data-act="unlockApiDays">🔓 Unlock to Edit</button>
+      <button class="btn btn-gold wide" style="margin-bottom:0" data-act="renewApi">I Renewed the API</button>
+    </div>
+
+    <button class="btn btn-outline wide" data-act="openReminder">⏰ API Renewal Reminder</button>
+
+    <div class="card">
+      <div class="price-head" style="margin-bottom:12px">
+        <div class="card-label" style="margin:0">🔑 Renewal Guide</div>
+        <button class="btn btn-outline small-btn" id="apiLangBtn" data-act="toggleApiLang">Türkçe</button>
+      </div>
+      <div class="guide" id="apiText"></div>
+    </div>
+
+    <button class="btn btn-gold wide" data-act="openSupabaseKeys">Open Supabase Secrets Page</button>
+  </div>
+</div>
+
+<!-- MODALS -->
+<div class="modal-wrap" id="limitModal" data-dismiss>
+  <div class="modal">
+    <div class="modal-icon">⚠️</div>
+    <div class="modal-title">Account Limit Reached</div>
+    <button class="btn btn-gold" data-act="closeModals">OK</button>
+  </div>
+</div>
+
+<div class="modal-wrap" id="confirmModal">
+  <div class="modal">
+    <div class="modal-icon">🗑️</div>
+    <div class="modal-title">Delete Account?</div>
+    <div class="modal-row">
+      <button class="btn btn-outline" data-act="confirmDeleteNo">No</button>
+      <button class="btn btn-red" data-act="confirmDeleteYes">Yes</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-wrap" id="reminderModal" data-dismiss>
+  <div class="modal" style="max-width:340px">
+    <div class="modal-icon">⏰</div>
+    <div class="modal-title">API Renewal Reminder</div>
+    <div class="field-label" style="text-align:left">Reminder Date</div>
+    <input class="field" id="reminderDate" type="date">
+    <button class="btn btn-gold" style="margin-bottom:0" data-act="addReminder">Add to Calendar</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="supabase-2.117.2.js"></script>
+<script src="config.js"></script>
+<script src="main.js"></script>
+<script src="list.js"></script>
+<script src="detail.js"></script>
+<script src="history.js"></script>
+<script src="live.js"></script>
+</body>
+</html>

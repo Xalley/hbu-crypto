@@ -1,0 +1,57 @@
+/* Giris, 2FA ve yeni ortak parcalar (eski tasarim diliyle) */
+#login, #mfaChallenge {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(240,185,11,.08), transparent),
+    var(--bg);
+}
+#login .logo-sub, #mfaChallenge .logo-sub { margin-bottom: 40px; }
+.auth-box { width: 100%; max-width: 340px; }
+.auth-err { color: var(--red); font-size: 13px; min-height: 18px; margin: -6px 0 10px; }
+.qr-wrap { background: #fff; border-radius: 10px; padding: 12px; width: 204px; height: 204px; margin: 4px auto 0; }
+.qr-wrap img { width: 180px; height: 180px; display: block; }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; word-break: break-all; color: var(--text); }
+
+.link-btn { background: none; border: none; color: var(--text-dim); font-size: 13px; margin-top: 18px; cursor: pointer; padding: 8px; }
+.center-col { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 24px; gap: 16px; }
+.btn.wide { max-width: none; }
+.small-btn { width: auto; max-width: none; padding: 6px 14px; margin: 0; font-size: 13px; }
+.pair-fields { display: flex; gap: 8px; margin-bottom: 16px; }
+.pair-fields .field { margin-bottom: 0; }
+.field:disabled { opacity: .5; }
+.hint { text-transform: none; letter-spacing: 0; color: var(--gold); }
+.pnl.dim { color: var(--text-dim); }
+.api-days { font-size: 32px; font-weight: 800; margin-bottom: 14px; color: var(--text); }
+.guide { font-size: 13px; color: var(--text-dim); line-height: 1.6; }
+
+.live-tag { margin-left: auto; color: var(--red); border-color: var(--red); }
+.live-tag.testnet { color: var(--gold); border-color: var(--gold); }
+
+.bot-msg { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+.bot-msg:empty { display: none; }
+.bot-msg.err { color: var(--red); }
+
+.warn-card { border-color: var(--gold); color: var(--gold); font-size: 13px; line-height: 1.5; }
+
+.signal.ok { color: var(--green); border: 1px solid var(--green); }
+.signal.no { color: var(--text-dim); border: 1px solid var(--border); }
+
+.hist-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+.reason { font-size: 11px; font-weight: 800; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); color: var(--text-dim); margin-left: auto; }
+.reason.r-SL, .reason.r-LIQ { color: var(--red); border-color: var(--red); }
+.reason.r-TP { color: var(--green); border-color: var(--green); }
+.reason.r-TRAIL { color: var(--gold); border-color: var(--gold); }
+
+.toast {
+  position: absolute; left: 16px; right: 16px; bottom: 24px; z-index: 40;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; font-size: 14px; display: none; animation: up .2s ease;
+}
+.toast.show { display: block; }
+.toast.err { border-color: var(--red); color: var(--red); }
+
+button:disabled { opacity: .5; pointer-events: none; }
+[hidden] { display: none !important; }
+.hist-row { flex-wrap: wrap; gap: 10px 14px; }

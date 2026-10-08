@@ -1,0 +1,22 @@
+#welcome {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(240,185,11,.08), transparent),
+    var(--bg);
+}
+.logo {
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+.logo span { color: var(--gold); }
+.logo-sub {
+  color: var(--text-dim);
+  font-size: 13px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  margin-bottom: 64px;
+}
