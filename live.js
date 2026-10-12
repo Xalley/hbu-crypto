@@ -30,8 +30,8 @@ async function loadLive() {
     liveCoin = liveAcc.coin || 'BNB';
     liveLev = liveAcc.leverage || 1;
     const safe = liveAcc.bot_mode === 'safe' && liveAcc.bot_running;
-    $('lMaFast').value = safe ? 20 : (liveAcc.ma_fast || 9);
-    $('lMaSlow').value = safe ? 100 : (liveAcc.ma_slow || 30);
+    $('lMaFast').value = safe ? 10 : (liveAcc.ma_fast || 9);
+    $('lMaSlow').value = safe ? 200 : (liveAcc.ma_slow || 30);
     $('lAmount').value = liveAcc.amount ?? '';
     $('lSl').value = liveAcc.sl_pct ?? '';
     $('lTp').value = liveAcc.tp_pct ?? '';
@@ -101,6 +101,7 @@ function renderLive() {
   btn.textContent = running ? 'Stop Bot' : 'Start Bot';
   btn.className = 'bot-btn' + (running ? ' stop' : '');
   $('lSafeBtn').hidden = running;
+  $('lSafeNote').hidden = running;
 
   ['lMaFast', 'lMaSlow', 'lAmount', 'lSl', 'lTp'].forEach(id => { $(id).disabled = running; });
   document.querySelectorAll('#lCoinSeg .seg-btn, #lLevSeg .seg-btn').forEach(b => { b.disabled = running; });
@@ -115,7 +116,7 @@ function renderLive() {
     $('lPosDir').className = p.dir === 'LONG' ? 'long' : 'short';
     $('lPosEntry').textContent = '$' + fmt(p.avgPrice, d);
     $('lPosSize').textContent = '$' + fmt(p.size * p.avgPrice / (a.leverage || 1));
-    $('lPosLev').textContent = (a.leverage || 1) + 'x';
+    $('lPosLev').textContent = (a.pos_lev != null ? Number(a.pos_lev).toFixed(2) : (a.leverage || 1)) + 'x';
     $('lPosSl').textContent = p.stopLoss > 0 ? '$' + fmt(p.stopLoss, d) : '⚠️ NONE';
     $('lPosSl').className = p.stopLoss > 0 ? '' : 'down';
     $('lPosPnl').textContent = signed(p.upnl || 0);
@@ -134,17 +135,20 @@ function renderLive() {
 
 async function lStart(mode) {
   let f = parseInt($('lMaFast').value, 10) || 9, s = parseInt($('lMaSlow').value, 10) || 30;
-  if (mode === 'safe') { f = 20; s = 100; }
+  if (mode === 'safe') { f = 10; s = 200; }
   if (mode === 'normal' && f >= s) throw new Error('MA Fast must be smaller than MA Slow');
   const amount = parseFloat($('lAmount').value);
   if (!(amount > 0)) throw new Error('Enter an amount');
-  const sl = parseFloat($('lSl').value) || null, tp = parseFloat($('lTp').value) || null;
+  const sl = mode === 'safe' ? null : (parseFloat($('lSl').value) || null);
+  const tp = mode === 'safe' ? null : (parseFloat($('lTp').value) || null);
   if (mode === 'normal' && !sl) throw new Error('Stop Loss is required for live normal mode');
   const real = liveStat && liveStat.env === 'mainnet';
   const msg = (real ? '⚠️ REAL MONEY (Bybit mainnet)\n\n' : 'TESTNET\n\n') +
-    (mode === 'safe' ? 'Safe Bot (SMA20/100 + ADX/CHOP + Chandelier)' : 'MA ' + f + '/' + s) + '\n' +
-    liveCoin + 'USDT · $' + amount + ' × ' + liveLev + 'x = $' + (amount * liveLev) + ' position\n' +
-    'Stop Loss: ' + (sl ? sl + '%' : 'Chandelier trailing') + ' · Take Profit: ' + (tp ? tp + '%' : 'Off') + '\n\nStart?';
+    (mode === 'safe' ? 'EMA Trend (8h EMA10/200, Chandelier 5×ATR)' : 'MA ' + f + '/' + s) + '\n' +
+    (mode === 'safe'
+      ? liveCoin + 'USDT · $' + amount + ' · leverage up to ' + liveLev + 'x (set by volatility)\n'
+      : liveCoin + 'USDT · $' + amount + ' × ' + liveLev + 'x = $' + (amount * liveLev) + ' position\n') +
+    'Stop Loss: ' + (mode === 'safe' ? 'Chandelier trailing (on Bybit)' : sl + '%') + ' · Take Profit: ' + (tp ? tp + '%' : 'Off') + '\n\nStart?';
   if (!confirm(msg)) return;
   await api('start_bot', { id: liveAcc.id, mode, coin: liveCoin, amount, leverage: liveLev, sl, tp, ma_fast: f, ma_slow: s });
   toast('Bot started');
