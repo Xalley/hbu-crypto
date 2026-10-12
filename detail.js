@@ -20,7 +20,7 @@ function readMa() {
 
 async function fetchMarket() {
   const { s } = readMa();
-  const need = Math.min(999, Math.max(s, 30, curAcc && curAcc.bot_running && curAcc.bot_mode === 'safe' ? 100 : 0));
+  const need = Math.min(999, Math.max(s, 30));
   await Promise.all(COINS.map(async c => {
     try {
       const t = await fetchTicker(c);
@@ -51,8 +51,8 @@ async function openAccount(i) {
   selCoin = curAcc.coin || 'BTC';
   setLev(curAcc.leverage || 1);
   const safe = curAcc.bot_mode === 'safe' && curAcc.bot_running;
-  $('inpMaFast').value = safe ? 20 : (curAcc.ma_fast || 9);
-  $('inpMaSlow').value = safe ? 100 : (curAcc.ma_slow || 30);
+  $('inpMaFast').value = safe ? 10 : (curAcc.ma_fast || 9);
+  $('inpMaSlow').value = safe ? 200 : (curAcc.ma_slow || 30);
   $('inpAmount').value = curAcc.amount ?? '';
   $('inpSl').value = curAcc.sl_pct ?? '';
   $('inpTp').value = curAcc.tp_pct ?? '';
@@ -88,22 +88,21 @@ function renderSafeRow(prefix, a) {
   const on = a.bot_running && a.bot_mode === 'safe' && ind;
   row.hidden = !on;
   if (!on) return;
-  $(prefix + 'Adx').textContent = Number.isFinite(ind.adx) ? ind.adx.toFixed(1) : '—';
-  $(prefix + 'Chop').textContent = Number.isFinite(ind.chop) ? ind.chop.toFixed(1) : '—';
+  $(prefix + 'Adx').textContent = Number.isFinite(ind.vol) ? (ind.vol * 100).toFixed(0) + '%' : '—';
+  const lev = a.pos_dir && a.pos_lev != null ? Number(a.pos_lev) : ind.lev_target;
+  $(prefix + 'Chop').textContent = Number.isFinite(lev) ? lev.toFixed(2) + 'x' : '—';
   const d = pxDigits(ind.close || 1);
-  $(prefix + 'Trail').textContent = a.trail_stop != null ? '$' + fmt(a.trail_stop, d) : '—';
+  $(prefix + 'Trail').textContent = a.pos_dir && a.trail_stop != null ? '$' + fmt(a.trail_stop, d) : '—';
   const f = $(prefix + 'Filter');
   if (a.pos_dir) { f.textContent = 'IN POS'; f.className = 'signal ok'; }
-  else if (a.armed) { f.textContent = ind.filters_ok ? 'READY' : 'ARMED'; f.className = 'signal ' + (ind.filters_ok ? 'ok' : 'no'); }
   else { f.textContent = 'WAIT'; f.className = 'signal no'; }
 }
 
 function botStatusText(a) {
   const safe = a.bot_mode === 'safe';
   if (!a.bot_running) return 'Bot Stopped';
-  if (a.pos_dir) return safe ? 'Safe Bot Running' : 'Bot Running';
-  if (safe) return a.armed ? 'Safe Bot — Armed' : 'Safe Bot — Waiting';
-  return 'Waiting for Signal';
+  if (a.pos_dir) return safe ? 'EMA Trend Running' : 'Bot Running';
+  return safe ? 'EMA Trend — Waiting' : 'Waiting for Signal';
 }
 
 function renderBotMsg(el, a) {
@@ -140,8 +139,9 @@ function updateUI() {
     fN = m.f; sN = m.s; fV = smaLast(closesData[selCoin], fN); sV = smaLast(closesData[selCoin], sN);
     sig = fV && sV ? (fV >= sV ? 'LONG' : 'SHORT') : null;
   }
-  $('dMaFastName').textContent = 'MA(' + fN + ')';
-  $('dMaSlowName').textContent = 'MA(' + sN + ')';
+  const pfx = running && safe ? 'EMA' : 'MA';
+  $('dMaFastName').textContent = pfx + '(' + fN + ')';
+  $('dMaSlowName').textContent = pfx + '(' + sN + ')';
   $('dMaFast').textContent = fV ? fmt(fV) : '—';
   $('dMaSlow').textContent = sV ? fmt(sV) : '—';
   const sg = $('dSignal');
@@ -167,7 +167,8 @@ function updateUI() {
   sBtn.hidden = running;
 
   lockDemoSettings(running);
-  if (running && safe) { $('inpMaFast').value = 20; $('inpMaSlow').value = 100; }
+  if (running && safe) { $('inpMaFast').value = 10; $('inpMaSlow').value = 200; }
+  $('safeNote').hidden = running;
 
   const pc = $('posCard');
   pc.hidden = !a.pos_dir;
@@ -177,7 +178,7 @@ function updateUI() {
     $('posDir').className = a.pos_dir === 'LONG' ? 'long' : 'short';
     $('posEntry').textContent = '$' + fmt(a.pos_entry, d);
     $('posSize').textContent = '$' + fmt(a.amount);
-    $('posLev').textContent = a.leverage + 'x';
+    $('posLev').textContent = (a.pos_lev != null ? Number(a.pos_lev).toFixed(2) : a.leverage) + 'x';
     const L = stopTpPrices(a);
     $('posSlTp').textContent = (L.stop != null ? '$' + fmt(L.stop, d) : 'Off') + ' / ' + (L.tp != null ? '$' + fmt(L.tp, d) : 'Off');
     $('posPnl').textContent = signed(pnl);
@@ -198,7 +199,8 @@ async function startDemo(mode) {
   const amount = parseFloat($('inpAmount').value) || Math.min(100, Number(curAcc.balance));
   await api('start_bot', {
     id: curAcc.id, mode, coin: selCoin, amount, leverage,
-    sl: parseFloat($('inpSl').value) || null, tp: parseFloat($('inpTp').value) || null,
+    sl: mode === 'safe' ? null : (parseFloat($('inpSl').value) || null),
+    tp: mode === 'safe' ? null : (parseFloat($('inpTp').value) || null),
     ma_fast: m.f, ma_slow: m.s,
   });
   await refreshAccount();
