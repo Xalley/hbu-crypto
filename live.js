@@ -137,7 +137,7 @@ async function lStart(mode) {
   let f = parseInt($('lMaFast').value, 10) || 9, s = parseInt($('lMaSlow').value, 10) || 30;
   if (mode === 'safe') { f = 10; s = 200; }
   if (mode === 'normal' && f >= s) throw new Error('MA Fast must be smaller than MA Slow');
-  const amount = parseFloat($('lAmount').value);
+  const amount = Math.floor(parseFloat($('lAmount').value));
   if (!(amount > 0)) throw new Error('Enter an amount');
   const sl = mode === 'safe' ? null : (parseFloat($('lSl').value) || null);
   const tp = mode === 'safe' ? null : (parseFloat($('lTp').value) || null);

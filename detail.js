@@ -196,7 +196,7 @@ async function startDemo(mode) {
   if (!curAcc || curAcc.bot_running) return;
   const m = readMa();
   if (mode === 'normal' && m.f >= m.s) throw new Error('MA Fast must be smaller than MA Slow');
-  const amount = parseFloat($('inpAmount').value) || Math.min(100, Number(curAcc.balance));
+  const amount = Math.floor(parseFloat($('inpAmount').value) || Math.min(100, Number(curAcc.balance)));
   await api('start_bot', {
     id: curAcc.id, mode, coin: selCoin, amount, leverage,
     sl: mode === 'safe' ? null : (parseFloat($('inpSl').value) || null),
