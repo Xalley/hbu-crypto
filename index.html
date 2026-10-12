@@ -150,8 +150,8 @@
         <div class="signal" id="dSignal">—</div>
       </div>
       <div class="ma-row" id="dSafeRow" hidden>
-        <div class="ma"><span class="ma-name">ADX ≥25</span><span id="dAdx">—</span></div>
-        <div class="ma"><span class="ma-name">CHOP ≤61.8</span><span id="dChop">—</span></div>
+        <div class="ma"><span class="ma-name">VOL (30d)</span><span id="dAdx">—</span></div>
+        <div class="ma"><span class="ma-name">LEV</span><span id="dChop">—</span></div>
         <div class="ma"><span class="ma-name">STOP</span><span id="dTrail">—</span></div>
         <div class="signal" id="dFilter">—</div>
       </div>
@@ -191,7 +191,8 @@
       <div class="bot-msg" id="botMsg"></div>
     </div>
 
-    <button class="btn btn-outline wide" id="safeBtn" data-act="toggleSafeBot">🛡️ Safe Bot</button>
+    <button class="btn btn-outline wide" id="safeBtn" data-act="toggleSafeBot">📈 EMA Trend Bot</button>
+    <div class="mode-note" id="safeNote">EMA Trend: 8h EMA10/200, own trailing stop (SL/TP ignored). Leverage button = upper limit; actual leverage is set by volatility.</div>
 
     <div class="card" id="posCard" hidden>
       <div class="card-label">Open Position</div>
@@ -246,8 +247,8 @@
         <div class="signal" id="lSignal">—</div>
       </div>
       <div class="ma-row" id="lSafeRow" hidden>
-        <div class="ma"><span class="ma-name">ADX ≥25</span><span id="lAdx">—</span></div>
-        <div class="ma"><span class="ma-name">CHOP ≤61.8</span><span id="lChop">—</span></div>
+        <div class="ma"><span class="ma-name">VOL (30d)</span><span id="lAdx">—</span></div>
+        <div class="ma"><span class="ma-name">LEV</span><span id="lChop">—</span></div>
         <div class="ma"><span class="ma-name">STOP</span><span id="lTrail">—</span></div>
         <div class="signal" id="lFilter">—</div>
       </div>
@@ -293,7 +294,8 @@
       <div class="bot-msg" id="lBotMsg"></div>
     </div>
 
-    <button class="btn btn-outline wide" id="lSafeBtn" data-act="lToggleSafeBot">🛡️ Safe Bot</button>
+    <button class="btn btn-outline wide" id="lSafeBtn" data-act="lToggleSafeBot">📈 EMA Trend Bot</button>
+    <div class="mode-note" id="lSafeNote">EMA Trend: 8h EMA10/200, own trailing stop on Bybit (SL/TP ignored). Leverage button = upper limit; actual leverage is set by volatility.</div>
 
     <div class="card" id="lPosCard" hidden>
       <div class="card-label">Open Position (Bybit)</div>
