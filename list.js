@@ -57,7 +57,7 @@ function renderList() {
           <div class="acc-balance">$${fmt(shown)}</div>
           <div style="font-size:12px;font-weight:700;margin-top:2px;color:${up ? 'var(--green)' : 'var(--red)'}">${signed(total)}</div>
         </div>
-        <div class="acc-tag">${a.bot_mode === 'safe' && a.bot_running ? 'SAFE' : 'DEMO'}</div>
+        <div class="acc-tag">${a.bot_mode === 'safe' && a.bot_running ? 'EMA' : 'DEMO'}</div>
       </div>
     </div>`;
   }).join('');
