@@ -44,7 +44,7 @@ async function renderHistory(accountId, title) {
     <div class="card">
       <div class="price-head">
         <div>
-          <div class="card-label">${esc(t.coin)}/USDT · ${esc(t.leverage)}x · ${t.mode === 'safe' ? 'SAFE · ' : ''}${esc(ds)}</div>
+          <div class="card-label">${esc(t.coin)}/USDT · ${esc(t.leverage)}x · ${t.mode === 'safe' ? 'EMA · ' : ''}${esc(ds)}</div>
           <div style="font-weight:800;font-size:15px" class="pnl ${t.direction === 'LONG' ? 'up' : 'down'}">${esc(t.direction)}</div>
         </div>
         <div class="pnl ${up ? 'up' : 'down'}" style="font-size:16px">${signed(t.pnl)}</div>
