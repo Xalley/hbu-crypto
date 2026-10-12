@@ -1,394 +1,1097 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<!-- Guvenlik: sadece kendi dosyalarimiz calisir; veri sadece Supabase ve Bybit'e gider. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://ezwrweshxhrutmsyvufi.supabase.co https://api.bybit.com; base-uri 'none'; form-action 'none'; manifest-src 'self'">
-<meta name="referrer" content="no-referrer">
-<meta name="theme-color" content="#0b0e11">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="HBU Crypto">
-<link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="icon-192.png">
-<link rel="apple-touch-icon" href="apple-touch-icon.png">
-<title>HBU Crypto</title>
-<link rel="stylesheet" href="base.css">
-<link rel="stylesheet" href="welcome.css">
-<link rel="stylesheet" href="list.css">
-<link rel="stylesheet" href="detail.css">
-<link rel="stylesheet" href="auth.css">
-</head>
-<body>
+// =====================================================================
+// HBU Crypto — bot-tick  (Supabase Edge Function, tek dosya)
+//
+// Strateji + emir motoru. SADECE su iki yerden cagrilir:
+//   1) pg_cron (her saat :01)          -> {"op":"tick"}
+//   2) bot-control fonksiyonu (sunucu) -> {"op":"tick","account_id":...}
+//                                         {"op":"live_status"} / {"op":"live_check",...}
+// Her istek x-tick-secret basligi ile dogrulanir (TICK_SECRET).
+// Dashboard ayari: "Verify JWT" = KAPALI (dogrulamayi kendimiz yapiyoruz).
+//
+// Gerekli secret'lar (Edge Functions -> Secrets):
+//   TICK_SECRET            en az 32 karakter rastgele
+//   BYBIT_API_KEY          (sadece canli icin)
+//   BYBIT_API_SECRET       (sadece canli icin)
+//   BYBIT_ENV              testnet | mainnet        (varsayilan: testnet)
+//   LIVE_TRADING_ENABLED   true | false             (varsayilan: false)
+//   LIVE_MAX_AMOUNT        USD, marjin ust siniri   (varsayilan: 50)
+//   LIVE_MAX_LEVERAGE      1-3                      (varsayilan: 3)
+// SUPABASE_URL ve SUPABASE_SERVICE_ROLE_KEY Supabase tarafindan otomatik verilir.
+// =====================================================================
 
-<!-- LOGIN -->
-<div class="screen active" id="login">
-  <div class="logo">HBU <span>Crypto</span></div>
-  <div class="logo-sub">Trading Bot</div>
-  <div class="auth-box">
-    <div class="field-label">Email</div>
-    <input class="field" id="loginEmail" type="email" autocomplete="username" inputmode="email">
-    <div class="field-label">Password</div>
-    <input class="field" id="loginPass" type="password" autocomplete="current-password">
-    <div class="auth-err" id="loginErr"></div>
-    <button class="btn btn-gold" data-act="login">Sign In</button>
-  </div>
-</div>
+import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2.117.2';
 
-<!-- 2FA: ILK KURULUM -->
-<div class="screen" id="mfaEnroll">
-  <div class="topbar">
-    <div class="topbar-title">Set Up 2-Step Verification</div>
-  </div>
-  <div class="detail">
-    <div class="card">
-      <div class="card-label">1 · Scan with Google Authenticator</div>
-      <div class="qr-wrap"><img id="mfaQr" alt="QR"></div>
-      <div class="card-label" style="margin-top:12px">Or enter key manually</div>
-      <div class="mono" id="mfaSecret">—</div>
-    </div>
-    <div class="card">
-      <div class="card-label">2 · Enter the 6-digit code</div>
-      <input class="field" id="mfaEnrollCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
-      <div class="auth-err" id="mfaEnrollErr"></div>
-      <button class="btn btn-gold" style="max-width:none;margin-bottom:0" data-act="mfaEnrollVerify">Verify</button>
-    </div>
-    <button class="btn btn-outline" style="max-width:none" data-act="logout">Cancel</button>
-  </div>
-</div>
+// ---------------------------------------------------------------------
+// SABITLER
+// ---------------------------------------------------------------------
+export const BAR_MS = 3_600_000;           // 1 saatlik mum
+export const FEE_RATE = 0.00055;           // Bybit taker komisyonu (market emir)
+export const MMR = 0.005;                  // demo likidasyon hesabi icin bakim marjini
+export const SAFE = {
+  fast: 20, slow: 100,
+  adxLen: 14, adxMin: 25,
+  chopLen: 14, chopMax: 61.8,
+  atrLen: 14, k: 4,
+  exitOnReverse: true,                     // ters kesisimde pozisyonu kapat (yedek cikis)
+} as const;
+const KLINE_LIMIT = 1000;
+const DATA_BASE = 'https://api.bybit.com'; // sinyal verisi her zaman ana piyasadan
 
-<!-- 2FA: GIRIS DOGRULAMA -->
-<div class="screen" id="mfaChallenge">
-  <div class="logo">HBU <span>Crypto</span></div>
-  <div class="logo-sub">2-Step Verification</div>
-  <div class="auth-box">
-    <div class="field-label">Authenticator Code</div>
-    <input class="field" id="mfaCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
-    <div class="auth-err" id="mfaErr"></div>
-    <button class="btn btn-gold" data-act="mfaVerify">Verify</button>
-    <button class="btn btn-outline" data-act="logout">Cancel</button>
-  </div>
-</div>
+export type Dir = 'LONG' | 'SHORT';
+export type Mode = 'normal' | 'safe';
+export type ExitReason = 'SIGNAL' | 'SL' | 'TP' | 'TRAIL' | 'LIQ';
+export interface Bar { t: number; o: number; h: number; l: number; c: number }
 
-<!-- WELCOME -->
-<div class="screen" id="welcome">
-  <div class="logo">HBU <span>Crypto</span></div>
-  <div class="logo-sub">Trading Bot</div>
-  <button class="btn btn-gold" data-act="openDemo">Demo Account</button>
-  <button class="btn btn-outline" data-act="openInvestment">Investment Account</button>
-  <button class="link-btn" data-act="logout">Log out</button>
-</div>
+// ---------------------------------------------------------------------
+// INDIKATORLER (saf fonksiyonlar)
+// ---------------------------------------------------------------------
+export function smaSeries(v: number[], n: number): number[] {
+  const out = new Array(v.length).fill(NaN);
+  let s = 0;
+  for (let i = 0; i < v.length; i++) {
+    s += v[i];
+    if (i >= n) s -= v[i - n];
+    if (i >= n - 1) out[i] = s / n;
+  }
+  return out;
+}
 
-<!-- INVESTMENT SELECT -->
-<div class="screen" id="investSelect">
-  <div class="topbar">
-    <button class="back" data-act="goWelcome">‹</button>
-    <div class="topbar-title">Investment Account</div>
-    <div class="acc-tag live-tag" data-env-tag>LIVE</div>
-  </div>
-  <div class="center-col">
-    <button class="btn btn-gold" data-act="openLive">Trade</button>
-    <button class="btn btn-outline" data-act="openApiPage">API</button>
-  </div>
-</div>
+export function trSeries(b: Bar[]): number[] {
+  return b.map((x, i) => i === 0
+    ? x.h - x.l
+    : Math.max(x.h - x.l, Math.abs(x.h - b[i - 1].c), Math.abs(x.l - b[i - 1].c)));
+}
 
-<!-- DEMO ACCOUNTS (LIST) -->
-<div class="screen" id="demo">
-  <div class="topbar">
-    <button class="back" data-act="goWelcome">‹</button>
-    <div class="topbar-title">Demo Accounts</div>
-  </div>
-  <div class="list" id="accList"></div>
-  <button class="fab" data-act="openSheet">+</button>
+// Wilder ATR: ATR[n] = ort(TR[1..n]), sonra (onceki*(n-1)+TR)/n
+export function atrSeries(b: Bar[], n: number): number[] {
+  const tr = trSeries(b);
+  const out = new Array(b.length).fill(NaN);
+  if (b.length <= n) return out;
+  let a = 0;
+  for (let i = 1; i <= n; i++) a += tr[i];
+  a /= n;
+  out[n] = a;
+  for (let i = n + 1; i < b.length; i++) { a = (a * (n - 1) + tr[i]) / n; out[i] = a; }
+  return out;
+}
 
-  <div class="overlay" id="sheetOverlay" data-dismiss>
-    <div class="sheet">
-      <div class="sheet-handle"></div>
-      <div class="field-label">Account Name</div>
-      <input class="field" id="inpName" placeholder="Demo 1" maxlength="24" autocomplete="off">
-      <div class="field-label">Starting Balance (USD)</div>
-      <input class="field" id="inpBalance" placeholder="1000" inputmode="decimal" autocomplete="off">
-      <button class="btn btn-gold" style="margin-bottom:0;max-width:none" data-act="createAccount">Create Account</button>
-    </div>
-  </div>
-</div>
+// Wilder ADX
+export function adxSeries(b: Bar[], n: number): number[] {
+  const len = b.length;
+  const out = new Array(len).fill(NaN);
+  if (len < 2 * n + 1) return out;
+  const tr = trSeries(b);
+  const pdm = new Array(len).fill(0), mdm = new Array(len).fill(0);
+  for (let i = 1; i < len; i++) {
+    const up = b[i].h - b[i - 1].h, dn = b[i - 1].l - b[i].l;
+    pdm[i] = up > dn && up > 0 ? up : 0;
+    mdm[i] = dn > up && dn > 0 ? dn : 0;
+  }
+  let sTR = 0, sP = 0, sM = 0;
+  for (let i = 1; i <= n; i++) { sTR += tr[i]; sP += pdm[i]; sM += mdm[i]; }
+  const dx = new Array(len).fill(NaN);
+  const dxAt = () => {
+    if (sTR === 0) return 0;
+    const pdi = 100 * sP / sTR, mdi = 100 * sM / sTR;
+    return pdi + mdi === 0 ? 0 : 100 * Math.abs(pdi - mdi) / (pdi + mdi);
+  };
+  dx[n] = dxAt();
+  for (let i = n + 1; i < len; i++) {
+    sTR = sTR - sTR / n + tr[i];
+    sP = sP - sP / n + pdm[i];
+    sM = sM - sM / n + mdm[i];
+    dx[i] = dxAt();
+  }
+  let a = 0;
+  for (let i = n; i < 2 * n; i++) a += dx[i];
+  a /= n;
+  out[2 * n - 1] = a;
+  for (let i = 2 * n; i < len; i++) { a = (a * (n - 1) + dx[i]) / n; out[i] = a; }
+  return out;
+}
 
-<!-- ACCOUNT DETAIL (DEMO) -->
-<div class="screen" id="account">
-  <div class="topbar">
-    <button class="back" data-act="openDemo">‹</button>
-    <div class="topbar-title" id="accTitle">Account</div>
-    <div class="acc-tag" style="margin-left:auto">DEMO</div>
-  </div>
+// Choppiness Index: 100 * log10( sum(TR,n) / (HH(n) - LL(n)) ) / log10(n)
+export function chopSeries(b: Bar[], n: number): number[] {
+  const tr = trSeries(b);
+  const out = new Array(b.length).fill(NaN);
+  for (let i = n; i < b.length; i++) {
+    let s = 0, hh = -Infinity, ll = Infinity;
+    for (let j = i - n + 1; j <= i; j++) { s += tr[j]; hh = Math.max(hh, b[j].h); ll = Math.min(ll, b[j].l); }
+    out[i] = hh > ll ? 100 * Math.log10(s / (hh - ll)) / Math.log10(n) : NaN;
+  }
+  return out;
+}
 
-  <div class="detail" id="detailScroll">
-    <div class="ptr" id="ptr">↓</div>
+// ---------------------------------------------------------------------
+// STRATEJI (saf karar fonksiyonu — demo ve canli ayni kodu kullanir)
+// ---------------------------------------------------------------------
+export interface StratParams {
+  mode: Mode; fast: number; slow: number;
+  slPct: number | null; tpPct: number | null; leverage: number;
+  simulateStops: boolean;   // demo: mum ici SL/TP/TRAIL/LIQ simule et. canli: borsa yapar
+}
+export interface StratState {
+  last_signal: Dir | null; armed: Dir | null; last_bar_time: number | null;
+  pos_dir: Dir | null; pos_entry: number | null; pos_extreme: number | null; trail_stop: number | null;
+  pos_lev?: number | null; pos_liq?: number | null;      // EMA Trend: giriste belirlenen kaldirac + likidasyon
+}
+export type Action =
+  | { type: 'exit'; reason: ExitReason; price: number; barTime: number }
+  | { type: 'enter'; dir: Dir; price: number; barTime: number; atr: number;
+      lev?: number; setting?: number; liq?: number; stop?: number };
+export interface Decision {
+  actions: Action[]; state: StratState; newBar: boolean; indicators: Record<string, unknown>;
+}
 
-    <div class="card balance-card">
-      <div class="card-label">Total Balance</div>
-      <div class="balance" id="dBalance">$0.00</div>
-      <div class="pnl" id="dTotalPnl">$0.00 (0.00%)</div>
-    </div>
+// ---------------------------------------------------------------------
+// EMA TREND (eski "safe" modun yerine) — kurallar STRATEJI.md'de
+//   8 saatlik mum kapanisinda (UTC 00/08/16) karar; stop + likidasyon her saat.
+//   Giris: EMA10 / EMA200 kesisimi (long ve short). Ters kesisimde kapat + ters yone gec.
+//   Stop: Chandelier — giristen beri en yuksek − 5×ATR(14, 8h); sadece lehe hareket eder.
+//   Stop sonrasi: sonraki kesisim beklenir.
+//   Kaldirac: girisle belirlenir = min(ust sinir, 0.60 / son 30 gun yillik volatilite), pozisyon boyunca sabit.
+//   Guvenlik: borsa kaldirac ayari = yukari yuvarlanmis kaldirac (izole); stop likidasyon mesafesinin yarisindan uzak olamaz.
+// ---------------------------------------------------------------------
+export const EMA = {
+  fast: 10, slow: 200, k: 5, atrLen: 14, volTarget: 0.60, volHours: 720, slip: 0.0002, tfMs: 8 * BAR_MS,
+} as const;
 
-    <div class="coin-row" id="coinRow">
-      <button class="coin" data-c="BTC" data-act="selectCoin">
-        <span class="coin-sym">BTC</span><span class="coin-price" id="pBTC">—</span>
-      </button>
-      <button class="coin" data-c="ETH" data-act="selectCoin">
-        <span class="coin-sym">ETH</span><span class="coin-price" id="pETH">—</span>
-      </button>
-      <button class="coin" data-c="BNB" data-act="selectCoin">
-        <span class="coin-sym">BNB</span><span class="coin-price" id="pBNB">—</span>
-      </button>
-    </div>
+export function emaSeries(v: number[], n: number): number[] {
+  const a = 2 / (n + 1), out = new Array(v.length);
+  for (let i = 0; i < v.length; i++) out[i] = i === 0 ? v[0] : a * v[i] + (1 - a) * out[i - 1];
+  return out;
+}
 
-    <div class="card">
-      <div class="price-head">
-        <div>
-          <div class="card-label" id="pairLabel">BTC/USDT</div>
-          <div class="big-price" id="dPrice">—</div>
-        </div>
-        <div class="chg" id="dChg">0.00%</div>
-      </div>
-      <div class="ma-row">
-        <div class="ma"><span class="ma-name" id="dMaFastName">MA(9)</span><span id="dMaFast">—</span></div>
-        <div class="ma"><span class="ma-name" id="dMaSlowName">MA(30)</span><span id="dMaSlow">—</span></div>
-        <div class="signal" id="dSignal">—</div>
-      </div>
-      <div class="ma-row" id="dSafeRow" hidden>
-        <div class="ma"><span class="ma-name">VOL (30d)</span><span id="dAdx">—</span></div>
-        <div class="ma"><span class="ma-name">LEV</span><span id="dChop">—</span></div>
-        <div class="ma"><span class="ma-name">STOP</span><span id="dTrail">—</span></div>
-        <div class="signal" id="dFilter">—</div>
-      </div>
-    </div>
+// 4 saatlik mumlardan UTC 00/08/16 hizali 8 saatlik mumlar (sadece iki parcasi da olanlar)
+export function aggregate8h(h4: Bar[]): Bar[] {
+  const out: Bar[] = [];
+  const byT = new Map(h4.map(b => [b.t, b]));
+  for (const b of h4) {
+    if (b.t % EMA.tfMs !== 0) continue;
+    const c = byT.get(b.t + 4 * BAR_MS);
+    if (!c) continue;
+    out.push({ t: b.t, o: b.o, h: Math.max(b.h, c.h), l: Math.min(b.l, c.l), c: c.c });
+  }
+  return out;
+}
 
-    <div class="card" id="settingsCard">
-      <div class="card-label">Trade Settings</div>
+// i. saatlik mum dahil son 720 saatlik log getirinin yillik standart sapmasi (orneklem std)
+export function volAt(h1: Bar[], i: number): number {
+  const n = EMA.volHours;
+  if (i < n) return NaN;
+  let sum = 0, sum2 = 0;
+  for (let j = i - n + 1; j <= i; j++) { const r = Math.log(h1[j].c / h1[j - 1].c); sum += r; sum2 += r * r; }
+  const mean = sum / n;
+  const v = (sum2 - n * mean * mean) / (n - 1);
+  return Math.sqrt(Math.max(v, 0)) * Math.sqrt(24 * 365);
+}
 
-      <div class="field-label">MA Fast / MA Slow</div>
-      <div class="pair-fields">
-        <input class="field" id="inpMaFast" placeholder="9" inputmode="numeric" maxlength="3" autocomplete="off">
-        <input class="field" id="inpMaSlow" placeholder="30" inputmode="numeric" maxlength="3" autocomplete="off">
-      </div>
+export function emaLev(maxLev: number, vol: number): number {
+  if (!Number.isFinite(vol) || vol <= 0) return Math.min(1, maxLev);
+  return Math.min(maxLev, EMA.volTarget / vol);
+}
 
-      <div class="field-label">Amount (USD)</div>
-      <input class="field" id="inpAmount" placeholder="100" inputmode="decimal" autocomplete="off">
-      <div class="field-label">Leverage</div>
-      <div class="seg" id="segLev">
-        <button class="seg-btn active" data-v="1" data-act="setLev">1x</button>
-        <button class="seg-btn" data-v="2" data-act="setLev">2x</button>
-        <button class="seg-btn" data-v="3" data-act="setLev">3x</button>
-      </div>
-      <div class="field-label">Stop Loss % of price (optional)</div>
-      <input class="field" id="inpSl" placeholder="Off" inputmode="decimal" autocomplete="off">
-      <div class="field-label">Take Profit % of price (optional)</div>
-      <input class="field" id="inpTp" placeholder="Off" inputmode="decimal" autocomplete="off" style="margin-bottom:0">
-    </div>
+export function emaEntry(dir: Dir, px: number, atr: number, lev: number) {
+  const d = dir === 'LONG' ? 1 : -1;
+  const setting = Math.max(1, Math.ceil(lev - 1e-9));
+  const liq = px * (1 - d * (1 / setting - MMR));
+  let stop = px - d * EMA.k * atr;
+  const cap = px - d * 0.5 * Math.abs(px - liq);           // likidasyon mesafesinin yarisi
+  stop = d > 0 ? Math.max(stop, cap) : Math.min(stop, cap);
+  return { setting, liq, stop };
+}
 
-    <div class="card">
-      <div class="bot-row">
-        <div class="bot-state">
-          <span class="dot" id="botDot"></span>
-          <span id="botText">Bot Stopped</span>
-        </div>
-        <button class="bot-btn" id="botBtn" data-act="toggleBot">Start Bot</button>
-      </div>
-      <div class="bot-msg" id="botMsg"></div>
-    </div>
+export interface EmaParams { maxLev: number; simulateStops: boolean }
 
-    <button class="btn btn-outline wide" id="safeBtn" data-act="toggleSafeBot">📈 EMA Trend Bot</button>
-    <div class="mode-note" id="safeNote">EMA Trend: 8h EMA10/200, own trailing stop (SL/TP ignored). Leverage button = upper limit; actual leverage is set by volatility.</div>
+export function emaMinBars() { return { h1: EMA.volHours + 2, h8: EMA.slow + EMA.atrLen + 2 }; }
 
-    <div class="card" id="posCard" hidden>
-      <div class="card-label">Open Position</div>
-      <div class="pos-grid">
-        <div class="pos-item"><span>Direction</span><b id="posDir">—</b></div>
-        <div class="pos-item"><span>Entry Price</span><b id="posEntry">—</b></div>
-        <div class="pos-item"><span>Margin</span><b id="posSize">—</b></div>
-        <div class="pos-item"><span>Leverage</span><b id="posLev">—</b></div>
-        <div class="pos-item"><span>Stop / TP</span><b id="posSlTp">—</b></div>
-        <div class="pos-item"><span>P&amp;L (net)</span><b id="posPnl">—</b></div>
-      </div>
-    </div>
+export function decideEma(p: EmaParams, s0: StratState, h1: Bar[], h8: Bar[]): Decision {
+  const s: StratState = { ...s0 };
+  const actions: Action[] = [];
+  const mb = emaMinBars();
+  if (h1.length < mb.h1 || h8.length < mb.h8) throw new Error(`Yetersiz mum verisi (1h ${h1.length}, 8h ${h8.length})`);
+  const closes8 = h8.map(b => b.c);
+  const ef = emaSeries(closes8, EMA.fast), es = emaSeries(closes8, EMA.slow);
+  const atr8 = atrSeries(h8, EMA.atrLen);
+  const trendAt = (j: number): Dir | null => ef[j] > es[j] ? 'LONG' : ef[j] < es[j] ? 'SHORT' : null;
+  const idx8 = new Map<number, number>();
+  h8.forEach((b, j) => idx8.set(b.t + EMA.tfMs, j));          // kapanis ani -> 8h index
+  const n = h1.length, last = h1[n - 1], j8 = h8.length - 1;
 
-    <button class="btn btn-outline wide" data-act="openHistory">Trade History</button>
-  </div>
-</div>
+  const snapshot = () => {
+    const vol = volAt(h1, n - 1);
+    return {
+      mode: 'ema', bar_time: last.t, close: last.c, fast: EMA.fast, slow: EMA.slow,
+      sma_fast: ef[j8], sma_slow: es[j8], trend: trendAt(j8), atr: atr8[j8], vol,
+      lev_target: emaLev(p.maxLev, vol), pos_lev: s.pos_lev ?? null, trail_stop: s.trail_stop, liq: s.pos_liq ?? null,
+    };
+  };
 
-<!-- TRADE HISTORY (demo + live ortak) -->
-<div class="screen" id="history">
-  <div class="topbar">
-    <button class="back" id="histBack" data-act="historyBack">‹</button>
-    <div class="topbar-title" id="histTitle">Trade History</div>
-  </div>
-  <div class="detail" id="histList"></div>
-</div>
+  // Ilk calisma: trendi kaydet, islem acma (sonraki kesisimi bekle)
+  if (s.last_bar_time == null) {
+    s.last_signal = trendAt(j8); s.armed = null; s.last_bar_time = last.t;
+    return { actions, state: s, newBar: true, indicators: snapshot() };
+  }
+  if (last.t <= s.last_bar_time) return { actions, state: s, newBar: false, indicators: snapshot() };
 
-<!-- LIVE TRADE -->
-<div class="screen" id="live">
-  <div class="topbar">
-    <button class="back" data-act="openInvestment">‹</button>
-    <div class="topbar-title">Trade</div>
-    <div class="acc-tag live-tag" data-env-tag>LIVE</div>
-  </div>
+  const clear = () => { s.pos_dir = null; s.pos_entry = null; s.pos_extreme = null; s.trail_stop = null; s.pos_lev = null; s.pos_liq = null; };
+  const start = h1.findIndex(b => b.t > s.last_bar_time!);
+  for (let i = start; i < n; i++) {
+    const b = h1[i];
+    // 1) saatlik stop / likidasyon (mum ici fitil, boslukta acilistan)
+    if (s.pos_dir && p.simulateStops) {
+      const d = s.pos_dir === 'LONG' ? 1 : -1;
+      // eski surumden kalan pozisyonda likidasyon/stop alanlari bos olabilir -> guvenli varsayilan
+      const liq = s.pos_liq ?? (d > 0 ? 0 : Number.MAX_VALUE);
+      const stop = s.trail_stop ?? liq;
+      const hit = d > 0 ? b.l <= stop : b.h >= stop;
+      const liqHit = d > 0 ? b.l <= liq : b.h >= liq;
+      if (hit || liqHit) {
+        const raw = d > 0 ? Math.min(stop, b.o) : Math.max(stop, b.o);
+        if ((d > 0 && raw <= liq) || (d < 0 && raw >= liq)) actions.push({ type: 'exit', reason: 'LIQ', price: liq, barTime: b.t });
+        else actions.push({ type: 'exit', reason: 'TRAIL', price: raw * (1 - EMA.slip * d), barTime: b.t });
+        clear();
+      }
+    }
+    // 2) 8 saatlik kapanis
+    const j = idx8.get(b.t + BAR_MS);
+    if (j !== undefined && j > 0) {
+      const tr = trendAt(j), prev = trendAt(j - 1);
+      if (tr && tr !== prev) {
+        const d = tr === 'LONG' ? 1 : -1;
+        if (s.pos_dir) {
+          const pd = s.pos_dir === 'LONG' ? 1 : -1;
+          actions.push({ type: 'exit', reason: 'SIGNAL', price: b.c * (1 - EMA.slip * pd), barTime: b.t });
+          clear();
+        }
+        const lev = emaLev(p.maxLev, volAt(h1, i));
+        const px = b.c * (1 + EMA.slip * d);
+        const e = emaEntry(tr, px, atr8[j], lev);
+        actions.push({ type: 'enter', dir: tr, price: px, barTime: b.t, atr: atr8[j], lev, setting: e.setting, liq: e.liq, stop: e.stop });
+        s.pos_dir = tr; s.pos_entry = px; s.pos_extreme = b.c; s.trail_stop = e.stop; s.pos_lev = lev; s.pos_liq = e.liq;
+      } else if (s.pos_dir && Number.isFinite(atr8[j])) {
+        const d = s.pos_dir === 'LONG' ? 1 : -1;
+        const cand = s.pos_extreme! - d * EMA.k * atr8[j];
+        s.trail_stop = d > 0 ? Math.max(s.trail_stop!, cand) : Math.min(s.trail_stop!, cand);
+      }
+      if (tr) s.last_signal = tr;
+    }
+    // 3) giristen beri en yuksek / en dusuk
+    if (s.pos_dir) s.pos_extreme = s.pos_dir === 'LONG' ? Math.max(s.pos_extreme!, b.h) : Math.min(s.pos_extreme!, b.l);
+  }
+  s.last_bar_time = last.t;
+  return { actions, state: s, newBar: true, indicators: snapshot() };
+}
 
-  <div class="detail" id="liveScroll">
-    <div class="ptr" id="livePtr">↓</div>
+export function levels(p: StratParams, s: StratState) {
+  const e = s.pos_entry!, long = s.pos_dir === 'LONG';
+  const sl = p.slPct ? (long ? e * (1 - p.slPct / 100) : e * (1 + p.slPct / 100)) : null;
+  const tp = p.tpPct ? (long ? e * (1 + p.tpPct / 100) : e * (1 - p.tpPct / 100)) : null;
+  const liq = long ? e * (1 - 1 / p.leverage + MMR) : e * (1 + 1 / p.leverage - MMR);
+  const trail = p.mode === 'safe' ? s.trail_stop : null;
+  // etkin stop: long icin en yuksek, short icin en dusuk seviye
+  let stop: number | null = null, stopReason: ExitReason = 'SL';
+  for (const [v, r] of [[sl, 'SL'], [trail, 'TRAIL']] as [number | null, ExitReason][]) {
+    if (v == null) continue;
+    if (stop == null || (long ? v > stop : v < stop)) { stop = v; stopReason = r; }
+  }
+  return { sl, tp, liq, trail, stop, stopReason };
+}
 
-    <div class="card warn-card" id="lWarn" hidden></div>
+export function initTrail(dir: Dir, price: number, atr: number): number {
+  return dir === 'LONG' ? price - SAFE.k * atr : price + SAFE.k * atr;
+}
 
-    <div class="card balance-card">
-      <div class="card-label">Bybit Balance (USDT)</div>
-      <div class="balance" id="lBalance">—</div>
-      <div class="pnl dim" id="lApiDays">—</div>
-    </div>
+function checkBar(p: StratParams, s: StratState, b: Bar): { reason: ExitReason; price: number } | null {
+  const L = levels(p, s), long = s.pos_dir === 'LONG';
+  if (long) {
+    if (L.stop != null && b.l <= L.stop) {
+      const px = Math.min(L.stop, b.o);              // bosluklu acilista acilis fiyatindan
+      return px <= L.liq ? { reason: 'LIQ', price: L.liq } : { reason: L.stopReason, price: px };
+    }
+    if (b.l <= L.liq) return { reason: 'LIQ', price: L.liq };
+    if (L.tp != null && b.h >= L.tp) return { reason: 'TP', price: Math.max(L.tp, b.o) };
+  } else {
+    if (L.stop != null && b.h >= L.stop) {
+      const px = Math.max(L.stop, b.o);
+      return px >= L.liq ? { reason: 'LIQ', price: L.liq } : { reason: L.stopReason, price: px };
+    }
+    if (b.h >= L.liq) return { reason: 'LIQ', price: L.liq };
+    if (L.tp != null && b.l <= L.tp) return { reason: 'TP', price: Math.min(L.tp, b.o) };
+  }
+  return null;
+}
 
-    <div class="card">
-      <div class="price-head">
-        <div>
-          <div class="card-label" id="lPair">BNB/USDT</div>
-          <div class="big-price" id="lPrice">—</div>
-        </div>
-        <div class="signal" id="lSignal">—</div>
-      </div>
-      <div class="ma-row" id="lSafeRow" hidden>
-        <div class="ma"><span class="ma-name">VOL (30d)</span><span id="lAdx">—</span></div>
-        <div class="ma"><span class="ma-name">LEV</span><span id="lChop">—</span></div>
-        <div class="ma"><span class="ma-name">STOP</span><span id="lTrail">—</span></div>
-        <div class="signal" id="lFilter">—</div>
-      </div>
-    </div>
+function ratchet(s: StratState, b: Bar, atr: number) {
+  if (!s.pos_dir || !Number.isFinite(atr)) return;
+  if (s.pos_dir === 'LONG') {
+    s.pos_extreme = Math.max(s.pos_extreme ?? b.h, b.h);
+    const cand = s.pos_extreme - SAFE.k * atr;
+    s.trail_stop = s.trail_stop == null ? cand : Math.max(s.trail_stop, cand);
+  } else {
+    s.pos_extreme = Math.min(s.pos_extreme ?? b.l, b.l);
+    const cand = s.pos_extreme + SAFE.k * atr;
+    s.trail_stop = s.trail_stop == null ? cand : Math.min(s.trail_stop, cand);
+  }
+}
 
-    <div class="card" id="lSettingsCard">
-      <div class="card-label">Bot Settings</div>
-      <div class="field-label">Coin</div>
-      <div class="seg" id="lCoinSeg">
-        <button class="seg-btn active" data-c="BNB" data-act="lSetCoin">BNB</button>
-        <button class="seg-btn" data-c="ETH" data-act="lSetCoin">ETH</button>
-        <button class="seg-btn" data-c="BTC" data-act="lSetCoin">BTC</button>
-      </div>
+function clearPos(s: StratState) {
+  s.pos_dir = null; s.pos_entry = null; s.pos_extreme = null; s.trail_stop = null;
+}
 
-      <div class="field-label">MA Fast / MA Slow</div>
-      <div class="pair-fields">
-        <input class="field" id="lMaFast" placeholder="9" inputmode="numeric" maxlength="3" autocomplete="off">
-        <input class="field" id="lMaSlow" placeholder="30" inputmode="numeric" maxlength="3" autocomplete="off">
-      </div>
+export function minBars(p: StratParams): number {
+  const slow = p.mode === 'safe' ? SAFE.slow : p.slow;
+  return Math.max(slow, 2 * SAFE.adxLen + 1, SAFE.chopLen + 1) + 1;
+}
 
-      <div class="field-label">Amount (USD) <span id="lMinHint" class="hint"></span></div>
-      <input class="field" id="lAmount" placeholder="10" inputmode="decimal" autocomplete="off">
-      <div class="field-label">Leverage</div>
-      <div class="seg" id="lLevSeg">
-        <button class="seg-btn active" data-v="1" data-act="lSetLev">1x</button>
-        <button class="seg-btn" data-v="2" data-act="lSetLev">2x</button>
-        <button class="seg-btn" data-v="3" data-act="lSetLev">3x</button>
-      </div>
-      <div class="field-label">Stop Loss % of price (required in normal mode)</div>
-      <input class="field" id="lSl" placeholder="e.g. 3" inputmode="decimal" autocomplete="off">
-      <div class="field-label">Take Profit % of price (optional)</div>
-      <input class="field" id="lTp" placeholder="Off" inputmode="decimal" autocomplete="off" style="margin-bottom:0">
-    </div>
+export function decide(p: StratParams, s0: StratState, bars: Bar[]): Decision {
+  const s: StratState = { ...s0 };
+  const actions: Action[] = [];
+  const n = bars.length;
+  if (n < minBars(p)) throw new Error(`Yetersiz mum verisi (${n})`);
+  const fast = p.mode === 'safe' ? SAFE.fast : p.fast;
+  const slow = p.mode === 'safe' ? SAFE.slow : p.slow;
+  const cur = bars[n - 1];
+  const closes = bars.map(b => b.c);
+  const smaF = smaSeries(closes, fast)[n - 1];
+  const smaS = smaSeries(closes, slow)[n - 1];
+  const atr = atrSeries(bars, SAFE.atrLen);
+  const adx = adxSeries(bars, SAFE.adxLen)[n - 1];
+  const chop = chopSeries(bars, SAFE.chopLen)[n - 1];
+  const sig: Dir = smaF >= smaS ? 'LONG' : 'SHORT';
+  const filtersOk = adx >= SAFE.adxMin && chop <= SAFE.chopMax;
 
-    <div class="card">
-      <div class="bot-row">
-        <div class="bot-state">
-          <span class="dot" id="lDot"></span>
-          <span id="lBotText">Bot Stopped</span>
-        </div>
-        <button class="bot-btn" id="lBotBtn" data-act="lToggleBot">Start Bot</button>
-      </div>
-      <div class="bot-msg" id="lBotMsg"></div>
-    </div>
+  const snapshot = () => ({
+    bar_time: cur.t, close: cur.c, fast, slow, sma_fast: smaF, sma_slow: smaS, trend: sig,
+    adx, chop, atr: atr[n - 1], filters_ok: filtersOk, armed: s.armed, trail_stop: s.trail_stop,
+  });
 
-    <button class="btn btn-outline wide" id="lSafeBtn" data-act="lToggleSafeBot">📈 EMA Trend Bot</button>
-    <div class="mode-note" id="lSafeNote">EMA Trend: 8h EMA10/200, own trailing stop on Bybit (SL/TP ignored). Leverage button = upper limit; actual leverage is set by volatility.</div>
+  // Ilk calisma: sadece mevcut trendi kaydet, ISLEM ACMA (ilk sinyal degisimini bekle)
+  if (s.last_bar_time == null) {
+    s.last_signal = sig; s.armed = null; s.last_bar_time = cur.t;
+    return { actions, state: s, newBar: true, indicators: snapshot() };
+  }
+  if (cur.t <= s.last_bar_time) return { actions, state: s, newBar: false, indicators: snapshot() };
 
-    <div class="card" id="lPosCard" hidden>
-      <div class="card-label">Open Position (Bybit)</div>
-      <div class="pos-grid">
-        <div class="pos-item"><span>Direction</span><b id="lPosDir">—</b></div>
-        <div class="pos-item"><span>Entry Price</span><b id="lPosEntry">—</b></div>
-        <div class="pos-item"><span>Margin</span><b id="lPosSize">—</b></div>
-        <div class="pos-item"><span>Leverage</span><b id="lPosLev">—</b></div>
-        <div class="pos-item"><span>Stop on Bybit</span><b id="lPosSl">—</b></div>
-        <div class="pos-item"><span>Unrealized P&amp;L</span><b id="lPosPnl">—</b></div>
-      </div>
-    </div>
+  // 1) Son islenen mumdan bu yana kapanan mumlar: mum ici stop kontrolu + trailing guncelleme
+  const start = bars.findIndex(b => b.t > s.last_bar_time!);
+  for (let i = start; i < n && s.pos_dir; i++) {
+    if (p.simulateStops) {
+      const hit = checkBar(p, s, bars[i]);
+      if (hit) {
+        actions.push({ type: 'exit', reason: hit.reason, price: hit.price, barTime: bars[i].t });
+        clearPos(s); s.armed = null;           // SL/TP sonrasi: yeni sinyal degisimini bekle
+        break;
+      }
+    }
+    if (p.mode === 'safe') ratchet(s, bars[i], atr[i]);
+  }
 
-    <button class="btn btn-outline wide" data-act="openLiveHistory">Trade History</button>
-  </div>
-</div>
+  // 2) Kapanis sinyali
+  const changed = sig !== s.last_signal;
+  const enter = (dir: Dir) => {
+    actions.push({ type: 'enter', dir, price: cur.c, barTime: cur.t, atr: atr[n - 1] });
+    s.pos_dir = dir; s.pos_entry = cur.c; s.pos_extreme = cur.c;
+    s.trail_stop = p.mode === 'safe' ? initTrail(dir, cur.c, atr[n - 1]) : null;
+  };
+  const exitSignal = () => {
+    actions.push({ type: 'exit', reason: 'SIGNAL', price: cur.c, barTime: cur.t });
+    clearPos(s);
+  };
 
-<!-- API PAGE -->
-<div class="screen" id="apiPage">
-  <div class="topbar">
-    <button class="back" data-act="openInvestment">‹</button>
-    <div class="topbar-title">API</div>
-  </div>
+  if (p.mode === 'normal') {
+    if (changed) {
+      if (s.pos_dir && s.pos_dir !== sig) exitSignal();
+      if (!s.pos_dir) enter(sig);
+    }
+  } else {
+    if (changed) {
+      s.armed = sig;
+      if (s.pos_dir && s.pos_dir !== sig && SAFE.exitOnReverse) exitSignal();
+    }
+    if (!s.pos_dir && s.armed && s.armed === sig && filtersOk) { enter(sig); s.armed = null; }
+  }
 
-  <div class="detail">
-    <div class="card" id="apiCard">
-      <div class="card-label">API Remaining Days</div>
-      <div class="api-days" id="apiInfo">—</div>
-      <div class="field-label">Enter remaining API days</div>
-      <input class="field" id="apiDaysInput" placeholder="89" inputmode="numeric" autocomplete="off" disabled>
-      <button class="btn btn-outline wide" data-act="unlockApiDays">🔓 Unlock to Edit</button>
-      <button class="btn btn-gold wide" style="margin-bottom:0" data-act="renewApi">I Renewed the API</button>
-    </div>
+  s.last_signal = sig;
+  s.last_bar_time = cur.t;
+  return { actions, state: s, newBar: true, indicators: snapshot() };
+}
 
-    <button class="btn btn-outline wide" data-act="openReminder">⏰ API Renewal Reminder</button>
+// ---------------------------------------------------------------------
+// YARDIMCILAR
+// ---------------------------------------------------------------------
+const env = (k: string, d = '') => (Deno.env.get(k) ?? d).trim();
+const num = (v: unknown): number | null => (v === null || v === undefined || v === '' ? null : Number(v));
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+const errMsg = (e: unknown) => (e instanceof Error ? e.message
+  : e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message)
+  : String(e)).slice(0, 300);
 
-    <div class="card">
-      <div class="price-head" style="margin-bottom:12px">
-        <div class="card-label" style="margin:0">🔑 Renewal Guide</div>
-        <button class="btn btn-outline small-btn" id="apiLangBtn" data-act="toggleApiLang">Türkçe</button>
-      </div>
-      <div class="guide" id="apiText"></div>
-    </div>
+export function safeEqual(a: string, b: string): boolean {
+  const ea = new TextEncoder().encode(a), eb = new TextEncoder().encode(b);
+  let diff = ea.length ^ eb.length;
+  for (let i = 0; i < Math.max(ea.length, eb.length); i++) diff |= (ea[i] ?? 0) ^ (eb[i] ?? 0);
+  return diff === 0;
+}
 
-    <button class="btn btn-gold wide" data-act="openSupabaseKeys">Open Supabase Secrets Page</button>
-  </div>
-</div>
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+}
 
-<!-- MODALS -->
-<div class="modal-wrap" id="limitModal" data-dismiss>
-  <div class="modal">
-    <div class="modal-icon">⚠️</div>
-    <div class="modal-title">Account Limit Reached</div>
-    <button class="btn btn-gold" data-act="closeModals">OK</button>
-  </div>
-</div>
+async function getJson(url: string): Promise<any> {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 10_000);
+  try {
+    const r = await fetch(url, { signal: ctl.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${url.split('?')[0]}`);
+    const j = await r.json();
+    if (j.retCode !== undefined && j.retCode !== 0) throw new Error(`Bybit ${j.retCode}: ${j.retMsg}`);
+    return j;
+  } finally { clearTimeout(t); }
+}
 
-<div class="modal-wrap" id="confirmModal">
-  <div class="modal">
-    <div class="modal-icon">🗑️</div>
-    <div class="modal-title">Delete Account?</div>
-    <div class="modal-row">
-      <button class="btn btn-outline" data-act="confirmDeleteNo">No</button>
-      <button class="btn btn-red" data-act="confirmDeleteYes">Yes</button>
-    </div>
-  </div>
-</div>
+// ---------------------------------------------------------------------
+// PIYASA VERISI (herkese acik)
+// ---------------------------------------------------------------------
+export async function fetchBars(coin: string): Promise<Bar[]> {
+  const j = await getJson(`${DATA_BASE}/v5/market/kline?category=linear&symbol=${coin}USDT&interval=60&limit=${KLINE_LIMIT}`);
+  const now = Date.now();
+  return (j.result.list as string[][])
+    .map(r => ({ t: +r[0], o: +r[1], h: +r[2], l: +r[3], c: +r[4] }))
+    .filter(b => b.t + BAR_MS <= now)        // sadece KAPANMIS mumlar
+    .sort((a, b) => a.t - b.t);
+}
 
-<div class="modal-wrap" id="reminderModal" data-dismiss>
-  <div class="modal" style="max-width:340px">
-    <div class="modal-icon">⏰</div>
-    <div class="modal-title">API Renewal Reminder</div>
-    <div class="field-label" style="text-align:left">Reminder Date</div>
-    <input class="field" id="reminderDate" type="date">
-    <button class="btn btn-gold" style="margin-bottom:0" data-act="addReminder">Add to Calendar</button>
-  </div>
-</div>
+// EMA Trend icin 8 saatlik mumlar: Bybit'te 8h aralik yok -> 4h mumlardan olusturulur.
+// 2 x 1000 adet 4h mum = ~1000 adet 8h mum (EMA200 icin yeterli isinma).
+export async function fetchBars8h(coin: string): Promise<Bar[]> {
+  const all = new Map<number, Bar>();
+  let end = Date.now();
+  for (let k = 0; k < 2; k++) {
+    const j = await getJson(`${DATA_BASE}/v5/market/kline?category=linear&symbol=${coin}USDT&interval=240&limit=1000&end=${end}`);
+    const list = j.result.list as string[][];
+    if (!list.length) break;
+    for (const r of list) all.set(+r[0], { t: +r[0], o: +r[1], h: +r[2], l: +r[3], c: +r[4] });
+    end = +list[list.length - 1][0] - 1;
+  }
+  const now = Date.now();
+  const h4 = [...all.values()].filter(b => b.t + 4 * BAR_MS <= now).sort((a, b) => a.t - b.t);
+  return aggregate8h(h4);
+}
 
-<div class="toast" id="toast"></div>
+async function fetchLastPrice(coin: string): Promise<number> {
+  const j = await getJson(`${DATA_BASE}/v5/market/tickers?category=linear&symbol=${coin}USDT`);
+  const p = Number(j.result.list[0].lastPrice);
+  if (!(p > 0)) throw new Error('Gecersiz fiyat');
+  return p;
+}
 
-<script src="supabase-2.117.2.js"></script>
-<script src="config.js"></script>
-<script src="main.js"></script>
-<script src="list.js"></script>
-<script src="detail.js"></script>
-<script src="history.js"></script>
-<script src="live.js"></script>
-</body>
-</html>
+// Emir fiyati: islemin yapildigi borsadan (testnet fiyati ana piyasadan farkli olabilir)
+async function fetchExecPrice(coin: string): Promise<number> {
+  const j = await getJson(`${bybitBase()}/v5/market/tickers?category=linear&symbol=${coin}USDT`);
+  const p = Number(j.result.list[0].lastPrice);
+  if (!(p > 0)) throw new Error('Gecersiz fiyat');
+  return p;
+}
+
+async function fetchFunding(coin: string): Promise<{ ts: number; rate: number }[]> {
+  const j = await getJson(`${DATA_BASE}/v5/market/funding/history?category=linear&symbol=${coin}USDT&limit=20`);
+  return (j.result.list as any[]).map(x => ({ ts: +x.fundingRateTimestamp, rate: +x.fundingRate }));
+}
+
+// ---------------------------------------------------------------------
+// BYBIT IMZALI ISTEMCI (sadece canli)
+// ---------------------------------------------------------------------
+class BybitError extends Error {
+  constructor(public code: number, msg: string) { super(`Bybit ${code}: ${msg}`); }
+}
+
+function bybitBase() {
+  return env('BYBIT_ENV', 'testnet') === 'mainnet' ? 'https://api.bybit.com' : 'https://api-testnet.bybit.com';
+}
+
+async function hmacHex(secret: string, msg: string): Promise<string> {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg));
+  return [...new Uint8Array(sig)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+
+async function bybit(method: 'GET' | 'POST', path: string, params: Record<string, unknown> = {}): Promise<any> {
+  const key = env('BYBIT_API_KEY'), secret = env('BYBIT_API_SECRET');
+  if (!key || !secret) throw new Error('Bybit API anahtari tanimli degil');
+  const ts = Date.now().toString(), recv = '10000';
+  let query = '', body = '';
+  if (method === 'GET') query = new URLSearchParams(params as Record<string, string>).toString();
+  else body = JSON.stringify(params);
+  const sign = await hmacHex(secret, ts + key + recv + (method === 'GET' ? query : body));
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 10_000);
+  try {
+    const r = await fetch(bybitBase() + path + (query ? '?' + query : ''), {
+      method, signal: ctl.signal,
+      headers: {
+        'X-BAPI-API-KEY': key, 'X-BAPI-SIGN': sign, 'X-BAPI-TIMESTAMP': ts,
+        'X-BAPI-RECV-WINDOW': recv, 'Content-Type': 'application/json',
+      },
+      body: method === 'POST' ? body : undefined,
+    });
+    const j = await r.json();
+    if (j.retCode !== 0) throw new BybitError(j.retCode, j.retMsg);
+    return j.result;
+  } finally { clearTimeout(t); }
+}
+
+interface Instrument { qtyStep: number; minQty: number; minNotional: number; tick: number }
+async function getInstrument(symbol: string): Promise<Instrument> {
+  const j = await getJson(`${bybitBase()}/v5/market/instruments-info?category=linear&symbol=${symbol}`);
+  const i = j.result.list[0];
+  return {
+    qtyStep: +i.lotSizeFilter.qtyStep, minQty: +i.lotSizeFilter.minOrderQty,
+    minNotional: +(i.lotSizeFilter.minNotionalValue ?? 5), tick: +i.priceFilter.tickSize,
+  };
+}
+
+const decimals = (step: number) => { const s = step.toString(); return s.includes('.') ? s.split('.')[1].length : 0; };
+export const floorStep = (v: number, step: number) => (Math.floor(v / step + 1e-9) * step).toFixed(decimals(step));
+export const roundTick = (v: number, tick: number) => (Math.round(v / tick) * tick).toFixed(decimals(tick));
+
+interface ExPos { size: number; dir: Dir | null; avgPrice: number; stopLoss: number; takeProfit: number; upnl: number }
+async function getPosition(symbol: string): Promise<ExPos> {
+  const r = await bybit('GET', '/v5/position/list', { category: 'linear', symbol });
+  const p = r.list?.[0];
+  const size = p ? Number(p.size) : 0;
+  return {
+    size, dir: size > 0 ? (p.side === 'Buy' ? 'LONG' : 'SHORT') : null,
+    avgPrice: p ? Number(p.avgPrice) : 0, stopLoss: p ? Number(p.stopLoss || 0) : 0,
+    takeProfit: p ? Number(p.takeProfit || 0) : 0, upnl: p ? Number(p.unrealisedPnl || 0) : 0,
+  };
+}
+
+async function getMarginMode(): Promise<string> {
+  const r = await bybit('GET', '/v5/account/info', {});
+  return r.marginMode;
+}
+
+async function getWallet() {
+  const r = await bybit('GET', '/v5/account/wallet-balance', { accountType: 'UNIFIED' });
+  const a = r.list?.[0] ?? {};
+  const usdt = (a.coin ?? []).find((c: any) => c.coin === 'USDT') ?? {};
+  return {
+    equity: Number(a.totalEquity || 0), usdtEquity: Number(usdt.equity || 0),
+    usdtWallet: Number(usdt.walletBalance || 0), upnl: Number(usdt.unrealisedPnl || 0),
+    available: Number(a.totalAvailableBalance || usdt.walletBalance || 0),
+  };
+}
+
+async function setLeverage(symbol: string, lev: number) {
+  try {
+    await bybit('POST', '/v5/position/set-leverage',
+      { category: 'linear', symbol, buyLeverage: String(lev), sellLeverage: String(lev) });
+  } catch (e) {
+    if (!(e instanceof BybitError && e.code === 110043)) throw e; // 110043 = zaten bu kaldirac
+  }
+}
+
+async function setStop(symbol: string, stopLoss: string) {
+  try {
+    await bybit('POST', '/v5/position/trading-stop',
+      { category: 'linear', symbol, positionIdx: 0, tpslMode: 'Full', stopLoss, slTriggerBy: 'MarkPrice' });
+  } catch (e) {
+    if (!(e instanceof BybitError && e.code === 34040)) throw e; // 34040 = degismedi
+  }
+}
+
+async function closedPnlFor(symbol: string, sinceMs: number, orderId?: string) {
+  for (let i = 0; i < 6; i++) {
+    const r = await bybit('GET', '/v5/position/closed-pnl', { category: 'linear', symbol, limit: '20' });
+    const list = (r.list ?? []) as any[];
+    const hit = orderId ? list.find(x => x.orderId === orderId) : list.find(x => +x.updatedTime >= sinceMs);
+    if (hit) return hit;
+    await sleep(1000);
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------
+// DB YARDIMCILARI
+// ---------------------------------------------------------------------
+type Acc = Record<string, any>;
+
+function stratParams(a: Acc, simulateStops: boolean): StratParams {
+  return {
+    mode: a.bot_mode, fast: a.ma_fast, slow: a.ma_slow,
+    slPct: num(a.sl_pct), tpPct: num(a.tp_pct), leverage: a.leverage, simulateStops,
+  };
+}
+function stratState(a: Acc): StratState {
+  return {
+    last_signal: a.last_signal, armed: a.armed, last_bar_time: num(a.last_bar_time),
+    pos_dir: a.pos_dir, pos_entry: num(a.pos_entry), pos_extreme: num(a.pos_extreme), trail_stop: num(a.trail_stop),
+    pos_lev: num(a.pos_lev), pos_liq: num(a.pos_liq),
+  };
+}
+// Hesabin moduna gore karar: 'safe' artik EMA Trend demek (DB degeri geriye uyum icin 'safe' kaldi)
+function decideFor(a: Acc, simulateStops: boolean, bars: Bar[], bars8: Bar[] | null): Decision {
+  if (a.bot_mode === 'safe') return decideEma({ maxLev: a.leverage, simulateStops }, stratState(a), bars, bars8!);
+  return decide(stratParams(a, simulateStops), stratState(a), bars);
+}
+const CLEARED = {
+  bot_running: false, stop_requested: false, last_signal: null, armed: null, last_bar_time: null,
+  pos_dir: null, pos_entry: null, pos_qty: null, pos_opened_at: null, pos_extreme: null, trail_stop: null,
+  pos_fees: 0, pos_funding: 0, last_funding_ts: null, error_count: 0, pos_lev: null, pos_liq: null,
+};
+const POS_CLEARED = {
+  pos_dir: null, pos_entry: null, pos_qty: null, pos_opened_at: null, pos_extreme: null,
+  trail_stop: null, pos_fees: 0, pos_funding: 0, last_funding_ts: null, pos_lev: null, pos_liq: null,
+};
+
+async function audit(db: SupabaseClient, a: Acc, action: string, detail: Record<string, unknown> = {}) {
+  await db.from('audit_log').insert({ user_id: a.user_id, account_id: a.id, actor: 'bot', action, detail });
+}
+
+export const UNLOCKED = '1970-01-01T00:00:00Z';
+
+// Kilidi atomik olarak alir ve satirin KILITTEN SONRAKI taze halini dondurur
+// (baska bir calisma az once islediyse eski veriyle tekrar islem yapilmaz).
+async function acquireLock(db: SupabaseClient, id: string): Promise<Acc | null> {
+  const now = new Date(), until = new Date(now.getTime() + 3 * 60_000);
+  const { data, error } = await db.from('accounts')
+    .update({ lock_until: until.toISOString() })
+    .eq('id', id)
+    .eq('bot_running', true)
+    .lt('lock_until', now.toISOString())      // kilit bos (epoch) ya da suresi dolmus
+    .select('*');
+  if (error) throw error;
+  return data && data.length === 1 ? data[0] : null;
+}
+
+// ---------------------------------------------------------------------
+// DEMO YURUTUCU (tum DB yazmalari sonda — yari islem kaydi olusmaz)
+// ---------------------------------------------------------------------
+interface Outcome { patch: Record<string, unknown>; trades: Record<string, unknown>[]; events: [string, Record<string, unknown>][] }
+
+export function demoClose(a: Acc, exitPrice: number, reason: string, funding: number, fees: number) {
+  const entry = Number(a.pos_entry), qty = Number(a.pos_qty), amount = Number(a.amount);
+  const lev = num(a.pos_lev) ?? Number(a.leverage);
+  const margin = a.pos_lev != null ? amount * lev / Math.max(1, Math.ceil(lev - 1e-9)) : amount;
+  const sign = a.pos_dir === 'LONG' ? 1 : -1;
+  const gross = (exitPrice - entry) * qty * sign;
+  const exitFee = exitPrice * qty * FEE_RATE;
+  const commission = fees + exitFee;
+  let pnl = gross - commission + funding;
+  if (pnl < -margin) pnl = -margin;            // izole marjin: kayip marjini asamaz
+  return {
+    trade: {
+      account_id: a.id, user_id: a.user_id, kind: 'demo', mode: a.bot_mode, coin: a.coin,
+      direction: a.pos_dir, entry_price: entry, exit_price: exitPrice, qty, amount,
+      leverage: Math.max(1, Math.round(lev)), gross_pnl: gross, commission, funding, pnl, close_reason: reason,
+      opened_at: a.pos_opened_at,
+    },
+    pnl,
+  };
+}
+
+async function runDemo(a: Acc, bars: Bar[], bars8: Bar[] | null, funding: () => Promise<{ ts: number; rate: number }[]>,
+  lastPrice: () => Promise<number>): Promise<Outcome> {
+  const out: Outcome = { patch: {}, trades: [], events: [] };
+  let bal = Number(a.balance);
+  let posFunding = Number(a.pos_funding || 0);
+  let posFees = Number(a.pos_fees || 0);
+  let lastFundTs = num(a.last_funding_ts);
+
+  // Funding ucretleri (acik pozisyon varken gecen her funding aninda)
+  if (a.pos_dir) {
+    const opened = new Date(a.pos_opened_at).getTime();
+    const evs = (await funding()).filter(f => f.ts > Math.max(lastFundTs ?? 0, opened) && f.ts <= Date.now());
+    const notionalPx = bars[bars.length - 1].c;
+    for (const f of evs) {
+      const pay = -(a.pos_dir === 'LONG' ? 1 : -1) * Number(a.pos_qty) * notionalPx * f.rate;
+      posFunding += pay;
+      lastFundTs = Math.max(lastFundTs ?? 0, f.ts);
+    }
+    out.patch.pos_funding = posFunding;
+    out.patch.last_funding_ts = lastFundTs;
+  }
+
+  // Kullanici durdurdu: anlik fiyattan kapat
+  if (a.stop_requested) {
+    if (a.pos_dir) {
+      const px = await lastPrice();
+      const c = demoClose(a, px, 'MANUAL', posFunding, posFees);
+      bal = Math.max(0, bal + c.pnl);
+      out.trades.push(c.trade);
+      out.events.push(['close', { reason: 'MANUAL', price: px, pnl: c.pnl }]);
+    }
+    out.patch = { ...CLEARED, balance: bal, status_msg: 'Stopped by user', indicators: null };
+    return out;
+  }
+
+  const d = decideFor(a, true, bars, bars8);
+  let pos = { ...a };
+  for (const act of d.actions) {
+    if (act.type === 'exit') {
+      const c = demoClose(pos, act.price, act.reason, posFunding, posFees);
+      bal = Math.max(0, bal + c.pnl);
+      out.trades.push(c.trade);
+      out.events.push(['close', { reason: act.reason, price: act.price, pnl: c.pnl }]);
+      Object.assign(out.patch, POS_CLEARED);
+      posFunding = 0; posFees = 0;
+      pos = { ...pos, ...POS_CLEARED };
+    } else {
+      const amount = Math.floor(Math.min(Number(a.amount), bal));   // tam dolar
+      if (amount < 1) {
+        out.patch = { ...out.patch, ...CLEARED, balance: bal, status_msg: 'HALTED: insufficient balance' };
+        out.events.push(['halt', { reason: 'insufficient balance' }]);
+        return out;
+      }
+      const lev = act.lev ?? a.leverage;
+      const qty = amount * lev / act.price;
+      posFees = act.price * qty * FEE_RATE;
+      posFunding = 0;
+      const opened = new Date(act.barTime + BAR_MS).toISOString();
+      const p = {
+        pos_dir: act.dir, pos_entry: act.price, pos_qty: qty, pos_opened_at: opened,
+        pos_fees: posFees, pos_funding: 0, last_funding_ts: act.barTime + BAR_MS, amount,
+        pos_lev: act.lev ?? null, pos_liq: act.liq ?? null,
+      };
+      Object.assign(out.patch, p);
+      pos = { ...pos, ...p };
+      out.events.push(['open', { dir: act.dir, price: act.price, qty, amount }]);
+    }
+  }
+  Object.assign(out.patch, {
+    balance: bal, last_signal: d.state.last_signal, armed: d.state.armed, last_bar_time: d.state.last_bar_time,
+    pos_extreme: d.state.pos_extreme, trail_stop: d.state.trail_stop, indicators: d.indicators,
+    pos_lev: d.state.pos_lev ?? null, pos_liq: d.state.pos_liq ?? null,
+    status_msg: d.state.pos_dir ? 'In position'
+      : a.bot_mode === 'safe' ? 'Waiting for EMA crossover' : 'Waiting for signal',
+  });
+  return out;
+}
+
+// ---------------------------------------------------------------------
+// CANLI YURUTUCU (borsa = tek dogru kaynak)
+// ---------------------------------------------------------------------
+function liveLimits() {
+  return {
+    enabled: env('LIVE_TRADING_ENABLED', 'false') === 'true',
+    maxAmount: Number(env('LIVE_MAX_AMOUNT', '50')) || 50,
+    maxLev: Math.min(3, Number(env('LIVE_MAX_LEVERAGE', '3')) || 3),
+    env: env('BYBIT_ENV', 'testnet') === 'mainnet' ? 'mainnet' : 'testnet',
+  };
+}
+
+function stopPriceFor(a: Acc, st: StratState): number | null {
+  const L = levels(stratParams(a, false), st);
+  return L.stop;
+}
+function tpPriceFor(a: Acc, st: StratState): number | null {
+  return levels(stratParams(a, false), st).tp;
+}
+
+async function runLive(db: SupabaseClient, a: Acc, bars: Bar[], bars8: Bar[] | null): Promise<Record<string, unknown>> {
+  const lim = liveLimits();
+  const symbol = a.coin + 'USDT';
+  const save = async (patch: Record<string, unknown>) => {
+    const { error } = await db.from('accounts').update(patch).eq('id', a.id);
+    if (error) throw error;
+    Object.assign(a, patch);
+  };
+  const recordTrade = async (reason: string, cp: any, fallbackPx: number, orderId?: string) => {
+    const entry = Number(a.pos_entry), qty = Number(a.pos_qty), sign = a.pos_dir === 'LONG' ? 1 : -1;
+    const exitPx = cp ? Number(cp.avgExitPrice) : fallbackPx;
+    const gross = (exitPx - entry) * qty * sign;
+    const fees = cp && cp.openFee !== undefined ? Math.abs(Number(cp.openFee)) + Math.abs(Number(cp.closeFee)) : null;
+    const pnl = cp ? Number(cp.closedPnl) : gross - 2 * exitPx * qty * FEE_RATE;
+    await db.from('trades').insert({
+      account_id: a.id, user_id: a.user_id, kind: 'live', mode: a.bot_mode, coin: a.coin,
+      direction: a.pos_dir, entry_price: cp ? Number(cp.avgEntryPrice) : entry, exit_price: exitPx,
+      qty, amount: a.amount, leverage: a.leverage, gross_pnl: gross,
+      commission: fees ?? Math.max(0, gross - pnl), funding: 0, pnl, close_reason: reason,
+      exchange_ref: orderId ?? cp?.orderId ?? null, opened_at: a.pos_opened_at,
+    });
+    await audit(db, a, 'close', { reason, exitPx, pnl, orderId: orderId ?? cp?.orderId });
+  };
+  const halt = async (msg: string) => {
+    await save({ bot_running: false, stop_requested: false, status_msg: 'HALTED: ' + msg });
+    await audit(db, a, 'halt', { msg });
+    return {};
+  };
+  const marketClose = async (reason: string, qty: number) => {
+    const t0 = Date.now();
+    const r = await bybit('POST', '/v5/order/create', {
+      category: 'linear', symbol, side: a.pos_dir === 'LONG' ? 'Sell' : 'Buy', orderType: 'Market',
+      qty: String(qty), reduceOnly: true, positionIdx: 0,
+      orderLinkId: `hbu-x-${a.id.slice(0, 8)}-${t0}`,
+    });
+    const cp = await closedPnlFor(symbol, t0 - 5000, r.orderId);
+    const px = cp ? Number(cp.avgExitPrice) : await fetchExecPrice(a.coin);
+    await recordTrade(reason, cp, px, r.orderId);
+    await save({ ...POS_CLEARED });
+  };
+
+  // 1) Mutabakat
+  const ex = await getPosition(symbol);
+  if (a.pos_dir && ex.size === 0) {
+    const cp = await closedPnlFor(symbol, new Date(a.pos_opened_at).getTime() - 60_000);
+    const L = levels(stratParams(a, false), stratState(a));
+    const exitPx = cp ? Number(cp.avgExitPrice) : await fetchExecPrice(a.coin);
+    const reason = L.tp && Math.abs(exitPx - L.tp) / L.tp < 0.003 ? 'TP' : (a.bot_mode === 'safe' ? 'TRAIL' : 'SL');
+    await recordTrade(reason, cp, exitPx);
+    await save({ ...POS_CLEARED, armed: null });
+  } else if (!a.pos_dir && ex.size > 0) {
+    return await halt('Borsada botun bilmedigi acik pozisyon var. Bybit\'i kontrol et.');
+  } else if (a.pos_dir && ex.dir !== a.pos_dir) {
+    return await halt('Borsa pozisyon yonu veritabaniyla uyusmuyor.');
+  } else if (a.pos_dir && ex.size > 0 && Math.abs(ex.size - Number(a.pos_qty)) > 1e-9) {
+    await save({ pos_qty: ex.size });
+  }
+
+  // 2) Kullanici durdurdu
+  if (a.stop_requested) {
+    if (a.pos_dir) await marketClose('MANUAL', Number(a.pos_qty));
+    await save({ ...CLEARED, status_msg: 'Stopped by user', indicators: null });
+    await audit(db, a, 'stopped', {});
+    return {};
+  }
+
+  // 3) Guvenlik limitleri (her turda yeniden)
+  if (Number(a.amount) > lim.maxAmount) return await halt(`Miktar sunucu limitini asiyor ($${lim.maxAmount})`);
+  if (a.leverage > lim.maxLev) return await halt(`Kaldirac sunucu limitini asiyor (${lim.maxLev}x)`);
+
+  // 4) Strateji
+  const d = decideFor(a, false, bars, bars8);
+  let st = { ...d.state };
+  const isEma = a.bot_mode === 'safe';
+  for (const act of d.actions) {
+    if (act.type === 'exit') {
+      if (a.pos_dir) await marketClose(act.reason, Number(a.pos_qty));
+    } else {
+      if (!lim.enabled) {
+        await audit(db, a, 'entry_blocked', { reason: 'LIVE_TRADING_ENABLED=false', dir: act.dir });
+        st = { ...st, pos_dir: null, pos_entry: null, pos_extreme: null, trail_stop: null };
+        continue;
+      }
+      if (await getMarginMode() !== 'ISOLATED_MARGIN') {
+        st = { ...st, pos_dir: null, pos_entry: null, pos_extreme: null, trail_stop: null };
+        await save({ last_signal: st.last_signal, armed: null, last_bar_time: st.last_bar_time });
+        return await halt('Bybit hesabi Isolated Margin modunda degil.');
+      }
+      const inst = await getInstrument(symbol);
+      const px = await fetchExecPrice(a.coin);
+      const lev = isEma ? act.lev! : a.leverage;
+      // Kullanilan marjin: ayarlanan miktar ile Bybit'teki serbest bakiyenin kucugu,
+      // %1 komisyon payi birakilarak TAM DOLARA asagi yuvarlanir (10.338 -> 10).
+      const wal = await getWallet();
+      const useAmount = Math.floor(Math.min(Number(a.amount), wal.available * 0.99));
+      if (useAmount < 1) {
+        await audit(db, a, 'entry_skipped', { reason: 'insufficient balance', available: wal.available });
+        st = { ...st, pos_dir: null, pos_entry: null, pos_extreme: null, trail_stop: null };
+        await save({ status_msg: 'Entry skipped: insufficient USDT balance on Bybit' });
+        continue;
+      }
+      const qty = floorStep(useAmount * lev / px, inst.qtyStep);
+      if (Number(qty) < inst.minQty || Number(qty) * px < inst.minNotional) {
+        await audit(db, a, 'entry_skipped', { reason: 'below exchange minimum', qty, px });
+        st = { ...st, pos_dir: null, pos_entry: null, pos_extreme: null, trail_stop: null };
+        await save({ status_msg: `Entry skipped: below Bybit minimum (min qty ${inst.minQty})` });
+        continue;
+      }
+      // Planlanan stop/TP (fiyata gore yeniden hesaplanir)
+      const plan: StratState = { ...st, pos_entry: px, pos_extreme: px,
+        trail_stop: isEma ? emaEntry(act.dir, px, act.atr, lev).stop : null };
+      const stop = stopPriceFor(a, plan);
+      if (stop == null) return await halt('Stop seviyesi hesaplanamadi — emir gonderilmedi.');
+      const tp = tpPriceFor(a, plan);
+      await setLeverage(symbol, isEma ? emaEntry(act.dir, px, act.atr, lev).setting : a.leverage);
+      const t0 = Date.now();
+      const order: Record<string, unknown> = {
+        category: 'linear', symbol, side: act.dir === 'LONG' ? 'Buy' : 'Sell', orderType: 'Market',
+        qty, positionIdx: 0, tpslMode: 'Full',
+        stopLoss: roundTick(stop, inst.tick), slTriggerBy: 'MarkPrice',
+        orderLinkId: `hbu-o-${a.id.slice(0, 8)}-${act.barTime}`,   // ayni mum icin tekrar emir engellenir
+      };
+      if (tp != null) { order.takeProfit = roundTick(tp, inst.tick); order.tpTriggerBy = 'MarkPrice'; }
+      const r = await bybit('POST', '/v5/order/create', order);
+      await sleep(1200);
+      const pos = await getPosition(symbol);
+      if (pos.size <= 0) return await halt('Emir gonderildi ama pozisyon gorunmuyor. Bybit\'i kontrol et.');
+      const fill = pos.avgPrice;
+      const fe = isEma ? emaEntry(act.dir, fill, act.atr, lev) : null;
+      const filled: StratState = { ...st, pos_dir: act.dir, pos_entry: fill, pos_extreme: fill,
+        trail_stop: fe ? fe.stop : null, pos_lev: fe ? lev : null, pos_liq: fe ? fe.liq : null };
+      await save({
+        pos_dir: act.dir, pos_entry: fill, pos_qty: pos.size, pos_opened_at: new Date(t0).toISOString(),
+        pos_extreme: fill, trail_stop: filled.trail_stop, pos_fees: 0, pos_funding: 0,
+        pos_lev: filled.pos_lev ?? null, pos_liq: filled.pos_liq ?? null,
+      });
+      await audit(db, a, 'open', { dir: act.dir, fill, qty: pos.size, amount: useAmount, orderId: r.orderId, stop });
+      // Stop borsada gercekten var mi? Yoksa koy; koyamazsan pozisyonu kapat.
+      if (!(pos.stopLoss > 0)) {
+        try { await setStop(symbol, roundTick(stopPriceFor(a, filled)!, inst.tick)); }
+        catch (e) {
+          await marketClose('SL', pos.size);
+          return await halt('Stop-loss borsaya konamadi, pozisyon kapatildi: ' + errMsg(e));
+        }
+      }
+      st = filled;
+    }
+  }
+
+  // 5) Trailing stop'u borsada guncelle (safe mod)
+  if (a.pos_dir && a.bot_mode === 'safe' && st.trail_stop != null) {
+    const inst = await getInstrument(symbol);
+    const px = await fetchExecPrice(a.coin);
+    const stop = stopPriceFor(a, st)!;
+    const crossed = a.pos_dir === 'LONG' ? stop >= px : stop <= px;
+    if (crossed) {
+      await marketClose('TRAIL', Number(a.pos_qty));
+      st = { ...st, pos_dir: null, pos_entry: null, pos_extreme: null, trail_stop: null, armed: null };
+    } else {
+      await setStop(symbol, roundTick(stop, inst.tick));
+    }
+  }
+
+  return {
+    last_signal: st.last_signal, armed: st.armed, last_bar_time: st.last_bar_time,
+    pos_extreme: a.pos_dir ? st.pos_extreme : null, trail_stop: a.pos_dir ? st.trail_stop : null,
+    pos_lev: a.pos_dir ? (st.pos_lev ?? null) : null, pos_liq: a.pos_dir ? (st.pos_liq ?? null) : null,
+    indicators: d.indicators,
+    status_msg: !lim.enabled ? 'Live trading disabled on server (no new entries)'
+      : a.pos_dir ? 'In position' : isEma ? 'Waiting for EMA crossover' : 'Waiting for signal',
+  };
+}
+
+// ---------------------------------------------------------------------
+// TICK
+// ---------------------------------------------------------------------
+async function runTick(db: SupabaseClient, onlyId?: string) {
+  let q = db.from('accounts').select('id').eq('bot_running', true);
+  if (onlyId) q = q.eq('id', onlyId);
+  const { data: accs, error } = await q;
+  if (error) throw error;
+
+  const barCache = new Map<string, Promise<Bar[]>>();
+  const bar8Cache = new Map<string, Promise<Bar[]>>();
+  const fundCache = new Map<string, Promise<{ ts: number; rate: number }[]>>();
+  const priceCache = new Map<string, Promise<number>>();
+  const memo = <T>(m: Map<string, Promise<T>>, k: string, f: () => Promise<T>) => {
+    if (!m.has(k)) m.set(k, f());
+    return m.get(k)!;
+  };
+  const results: Record<string, unknown>[] = [];
+
+  for (const row of accs ?? []) {
+    const a = await acquireLock(db, row.id);
+    if (!a) { results.push({ id: row.id, skipped: 'locked' }); continue; }
+    let patch: Record<string, unknown> = {};
+    try {
+      const bars = await memo(barCache, a.coin, () => fetchBars(a.coin));
+      const bars8 = a.bot_mode === 'safe' ? await memo(bar8Cache, a.coin, () => fetchBars8h(a.coin)) : null;
+      if (a.kind === 'demo') {
+        const o = await runDemo(a, bars, bars8,
+          () => memo(fundCache, a.coin, () => fetchFunding(a.coin)),
+          () => memo(priceCache, a.coin, () => fetchLastPrice(a.coin)));
+        patch = o.patch;
+        const { error: e1 } = await db.from('accounts').update({ ...patch, error_count: 0 }).eq('id', a.id);
+        if (e1) throw e1;
+        if (o.trades.length) {
+          const { error: e2 } = await db.from('trades').insert(o.trades);
+          if (e2) throw e2;
+        }
+        for (const [action, detail] of o.events) await audit(db, a, action, detail);
+        patch = {};
+      } else {
+        patch = await runLive(db, a, bars, bars8);
+      }
+      patch.error_count = 0;
+      results.push({ id: a.id, ok: true });
+    } catch (e) {
+      const ec = (a.error_count ?? 0) + 1;
+      patch = { error_count: ec, status_msg: 'ERROR: ' + errMsg(e) };
+      if (ec >= 3) { patch.bot_running = false; patch.status_msg = 'HALTED after 3 errors: ' + errMsg(e); }
+      await audit(db, a, ec >= 3 ? 'halt' : 'error', { msg: errMsg(e) });
+      results.push({ id: a.id, ok: false });
+    } finally {
+      await db.from('accounts').update({ ...patch, lock_until: UNLOCKED }).eq('id', a.id);
+    }
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------
+// CANLI DURUM / ON KONTROL (bot-control uzerinden)
+// ---------------------------------------------------------------------
+async function liveStatus(coin: string) {
+  const lim = liveLimits();
+  const out: Record<string, unknown> = {
+    env: lim.env, live_enabled: lim.enabled, max_amount: lim.maxAmount, max_leverage: lim.maxLev,
+  };
+  try {
+    out.wallet = await getWallet();
+    out.margin_mode = await getMarginMode();
+    const inst = await getInstrument(coin + 'USDT');
+    const px = await fetchExecPrice(coin);
+    out.min_order_usd = Math.max(inst.minQty * px, inst.minNotional);
+    out.position = await getPosition(coin + 'USDT');
+  } catch (e) { out.error = errMsg(e); }
+  return out;
+}
+
+async function liveCheck(coin: string, amount: number, leverage: number) {
+  const lim = liveLimits();
+  if (!lim.enabled) return { ok: false, msg: 'Live trading is disabled on the server (LIVE_TRADING_ENABLED).' };
+  if (amount > lim.maxAmount) return { ok: false, msg: `Amount exceeds server limit ($${lim.maxAmount}).` };
+  if (leverage > lim.maxLev) return { ok: false, msg: `Leverage exceeds server limit (${lim.maxLev}x).` };
+  try {
+    if (await getMarginMode() !== 'ISOLATED_MARGIN') return { ok: false, msg: 'Set Bybit account to Isolated Margin first.' };
+    const pos = await getPosition(coin + 'USDT');
+    if (pos.size > 0) return { ok: false, msg: 'There is already an open position on Bybit for this coin.' };
+    const inst = await getInstrument(coin + 'USDT');
+    const px = await fetchExecPrice(coin);
+    const qty = Number(floorStep(amount * leverage / px, inst.qtyStep));
+    if (qty < inst.minQty || qty * px < inst.minNotional) {
+      const need = Math.max(inst.minQty * px, inst.minNotional) / leverage;
+      return { ok: false, msg: `Below Bybit minimum. Need at least ~$${need.toFixed(2)} at ${leverage}x.` };
+    }
+    const w = await getWallet();
+    if (w.usdtEquity < amount) return { ok: false, msg: 'Insufficient USDT balance on Bybit.' };
+    return { ok: true };
+  } catch (e) { return { ok: false, msg: errMsg(e) }; }
+}
+
+// ---------------------------------------------------------------------
+// GIRIS NOKTASI
+// ---------------------------------------------------------------------
+export async function handler(req: Request): Promise<Response> {
+  if (req.method !== 'POST') return json({ error: 'method' }, 405);
+  const secret = env('TICK_SECRET');
+  if (secret.length < 32) return json({ error: 'server misconfigured' }, 500);
+  if (!safeEqual(req.headers.get('x-tick-secret') ?? '', secret)) return json({ error: 'unauthorized' }, 401);
+
+  let body: any = {};
+  try { body = await req.json(); } catch { /* bos govde */ }
+  const db = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'),
+    { auth: { persistSession: false, autoRefreshToken: false } });
+  const coin = ['BTC', 'ETH', 'BNB'].includes(body.coin) ? body.coin : 'BTC';
+
+  try {
+    switch (body.op ?? 'tick') {
+      case 'tick': {
+        const id = typeof body.account_id === 'string' && /^[0-9a-f-]{36}$/.test(body.account_id) ? body.account_id : undefined;
+        return json({ ok: true, results: await runTick(db, id) });
+      }
+      case 'live_status': return json(await liveStatus(coin));
+      case 'live_check': return json(await liveCheck(coin, Number(body.amount), Number(body.leverage)));
+      default: return json({ error: 'unknown op' }, 400);
+    }
+  } catch (e) {
+    console.error(e);
+    return json({ error: errMsg(e) }, 500);
+  }
+}
+
+if (Deno.env.get('HBU_TEST') !== '1') Deno.serve(handler);
