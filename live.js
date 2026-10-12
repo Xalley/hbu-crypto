@@ -91,7 +91,7 @@ function renderLive() {
   renderSafeRow('l', a);
 
   const hint = $('lMinHint');
-  hint.textContent = s.min_order_usd ? '· min ~$' + fmt(s.min_order_usd / liveLev) + ' at ' + liveLev + 'x · max $' + fmt(s.max_amount, 0) : '';
+  hint.textContent = s.min_order_usd ? '· min ~$' + fmt(s.min_order_usd / liveLev) + ' at ' + liveLev + 'x' + (s.max_amount ? ' · max $' + fmt(s.max_amount, 0) : '') : '';
 
   const running = a.bot_running;
   $('lDot').className = 'dot' + (running ? ' on' : '');
